@@ -251,7 +251,10 @@ class Reader
     {
         for (;;)
         {
-            int retval = in.readAll(buf + bufidx, BUFSIZE - bufidx);
+            int retval = 0;
+            if (!full_scan)
+                retval = in.read(buf + bufidx, BUFSIZE - bufidx);
+
             if (retval > 0 || full_scan)
             {
                 int i = bufidx;
@@ -308,23 +311,23 @@ class Reader
 
                 if (ready != 0)
                     break;
+            }
 
-                if (bufidx == BUFSIZE || in.EndOfFile() || in.hasError())
-                {
-                    if (in.errNo() == EWOULDBLOCK)
-                        in.clearError();
-                    else
-                        ready = bufidx;
+            if (bufidx == BUFSIZE || in.EndOfFile() || in.hasError())
+            {
+                if (in.errNo() == EWOULDBLOCK)
+                    in.clearError();
+                else
+                    ready = bufidx;
 
-                    break;
-                }
+                break;
             }
         }
     };
 
   public:
-    // Wraps a Reader around in, which you probably want to be in
-    // non-blocking mode, because otherwise even the function hasNext() will block.
+    // Wraps a Reader around in. If the file is in blocking mode, hasNext() will block
+    // until data is available.
     // in has to be open already.
     Reader(File& _in) : in(_in), bufidx(0), ready(0), wsComp(3), full_scan(false), comment(';'), in_comment(false){};
 
@@ -349,6 +352,8 @@ class Reader
     // right away, so you will never see it when testing the in File for an error.
     // Other errors will be kept, so you can test the in File to see if everything
     // is still working.
+    // You probably don't want to use hasNext() if the underlying file is in
+    // blocking mode.
     bool hasNext()
     {
         if (ready == 0)

@@ -184,6 +184,7 @@ void gcode_tests()
     delete line;
     line = reader.next();
     assert(line == 0);
+    assert(!reader.hasNext());
 }
 
 void marlinbuf_tests()
@@ -324,7 +325,7 @@ void file_tests()
         sleep(2);
         kill(parentpid, SIGCHLD);
         sleep(1);
-        assert(pr.readAll(bigblock, sizeof(bigblock)) == sizeof(bigblock));
+        assert(pr.read(bigblock, sizeof(bigblock)) == sizeof(bigblock));
         exit(1);
     };
 
@@ -358,14 +359,16 @@ void file_tests()
         sleep(2);
         kill(parentpid, SIGCHLD);
         sleep(1);
-        assert(pr.readAll(bigblock, pre_fill_size) == pre_fill_size);
+        assert(pr.read(bigblock, pre_fill_size) == pre_fill_size);
         pr.setNonBlock(true);
-        assert(pr.readAll(bigblock, sizeof(bigblock), 1000, 2000) == sizeof(bigblock));
+        assert(pr.read(bigblock, sizeof(bigblock), 1000, 2000) == sizeof(bigblock));
         exit(1);
     };
 
     assert(pw.writeAll(bigblock, sizeof(bigblock), &nrest, &bufrest));
     assert(!pw.hasError());
+    assert(nrest == 0);
+    assert(bufrest == (const void*)&bigblock[sizeof(bigblock)]);
 
     childpid = fork();
     assert(childpid >= 0);
@@ -405,13 +408,13 @@ void file_tests()
     assert(fi.stat(&statbuf));
     assert(S_ISREG(statbuf.st_mode));
     char filebuf[1024];
-    assert(fi.readAll(filebuf, sizeof(filebuf)) == 62);
+    assert(fi.read(filebuf, sizeof(filebuf)) == 62);
     assert(fi.EndOfFile());
 
     void* illptr = (void*)LONG_LONG_MAX;
     assert(fi.open());
     assert(!fi.EndOfFile());
-    assert(fi.readAll(illptr, 1) < 0);
+    assert(fi.read(illptr, 1) < 0);
     assert(fi.errNo() == EFAULT);
     assert(fi.close());
     statbuf.st_mode = 0;
@@ -419,11 +422,24 @@ void file_tests()
     assert(S_ISREG(statbuf.st_mode));
 
     assert(pr.setNonBlock(true));
-    pr.readAll(bigblock, sizeof(bigblock));
+    pr.read(bigblock, sizeof(bigblock), 200); // drain the pipe
     pr.clearError();
-    assert(pr.readAll(bigblock, sizeof(bigblock)) < 0);
+    assert(pr.read(bigblock, sizeof(bigblock)) < 0);
     assert(pr.hasError());
     assert(pr.errNo() == EWOULDBLOCK);
+    pr.clearError();
+    assert(pr.tail(bigblock, sizeof(bigblock)) == 0);
+    assert(!pr.hasError());
+    assert(pr.errNo() == 0);
+    assert(pr.setNonBlock(false));
+    pr.clearError();
+    assert(pr.read(bigblock, sizeof(bigblock), 0, 0) < 0);
+    assert(pr.hasError());
+    assert(pr.errNo() == EWOULDBLOCK);
+    pr.clearError();
+    assert(pr.tail(bigblock, sizeof(bigblock), 0, 0) == 0);
+    assert(!pr.hasError());
+    assert(pr.errNo() == 0);
 
     File doesnotexist("test/doesnotexist");
     assert(!doesnotexist.stat(&statbuf));

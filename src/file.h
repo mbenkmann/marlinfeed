@@ -23,6 +23,7 @@
 #define FILE_H
 
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <stdio.h>
 #include <string.h>
@@ -361,10 +362,22 @@ class File
     //            more data to become available before returning.
     //            more_wait <= 0 causes the function to end the first time data becomes
     //            unavailable (except EINTR, which is handled transparently)
+    //            Note that more_wait only comes into play after the 1st byte has
+    //            been read, i.e. a blocking file will block until at least 1 byte
+    //            is read OR max_time expires.
     // max_time: If > 0, this is the maximum number of milliseconds the function
-    //           will take, regardless if waiting or reading.
-    //           If <= 0 the function will continue reading until either more_wait
-    //           or EOF or an error stops it.
+    //             will take, regardless if waiting or reading.
+    //             Even if the file descriptor is non-blocking, the function will
+    //             wait up to this time for data.
+    //           If < 0 the function will continue reading until either more_wait
+    //             or EOF or an error stops it. If the file is non-blocking and no
+    //             data is immediately available, this will be reported as an
+    //             EWOULDBLOCK error.
+    //           If == 0 the function will read all data that is immediately
+    //             available. If no data is immediately available, an EWOULDBLOCK
+    //             error condition is returned REGARDLESS of the non-blocking state
+    //             of the file. This allows you to effectively do a non-blocking
+    //             read on a blocking file.
     //
     // Returns: < 0 if error; otherwise the number of bytes read.
     //          EAGAIN is converted to EWOULDBLOCK so you only have to check for
@@ -374,11 +387,9 @@ class File
     //          with no error.
     //          If bufsz !=0 a return value of 0 indicates EOF.
     //
-    // NOTE: Currently more_wait and max_time only work properly for non-blocking
-    // file descriptors.
     // max_time is a rough guidance intended to prevent blocking indefinitely.
     // It is not a precise timing device.
-    int readAll(void* buf, size_t bufsz, int more_wait = 0, int max_time = 0)
+    int read(void* buf, size_t bufsz, int more_wait = 0, int max_time = -1)
     {
         return tail(buf, bufsz, more_wait, max_time, true, false);
     }
@@ -390,10 +401,22 @@ class File
     //            more data to become available before returning.
     //            more_wait <= 0 causes the function to end the first time data becomes
     //            unavailable (except EINTR, which is handled transparently)
+    //            Note that more_wait only comes into play after the 1st byte has
+    //            been read, i.e. a blocking file will block until at least 1 byte
+    //            is read OR max_time expires.
     // max_time: If > 0, this is the maximum number of milliseconds the function
-    //           will take, regardless if waiting or reading.
-    //           If <= 0 the function will continue reading until either more_wait
-    //           or EOF or an error stops it.
+    //             will take, regardless if waiting or reading.
+    //             Even if the file descriptor is non-blocking, the function will
+    //             wait up to this time for data.
+    //           If < 0 the function will continue reading until either more_wait
+    //             or EOF or an error stops it. If the file is non-blocking and no
+    //             data is immediately available, this will be reported as an
+    //             EWOULDBLOCK error.
+    //           If == 0 the function will read all data that is immediately
+    //             available. If no data is immediately available, this function
+    //             returns 0 REGARDLESS of the non-blocking state
+    //             of the file. This allows you to effectively do a non-blocking
+    //             read on a blocking file.
     //
     // Returns: < 0 if error; otherwise the number of bytes in the buffer. If the
     //          returned number is < bufsz, this corresponds to the total bytes read.
@@ -401,16 +424,15 @@ class File
     //          This function DOES NOT report EAGAIN or EWOULDBLOCK as error
     //          conditions, even if nothing has been read.
     //
-    // NOTE: Currently more_wait and max_time only work properly for non-blocking
-    // file descriptors.
     // max_time is a rough guidance intended to prevent blocking indefinitely.
     // It is not a precise timing device.
-    int tail(void* buf, size_t bufsz, int more_wait = 0, int max_time = 0)
+    int tail(void* buf, size_t bufsz, int more_wait = 0, int max_time = -1)
     {
         return tail(buf, bufsz, more_wait, max_time, false, true);
     }
 
   private:
+    // Combines read() and tail() through use of report_ewouldblock and do_tail
     int tail(void* buf, size_t bufsz, int more_wait, int max_time, bool report_ewouldblock, bool do_tail)
     {
         if (hasError())
@@ -423,19 +445,78 @@ class File
         {
             0, 0
         };
-        if (max_time > 0)
-            gettimeofday(&tv, 0);
+        if (max_time < 0)
+            max_time = INT_MAX;
+        gettimeofday(&tv, 0);
         int64_t start_millis = (int64_t)tv.tv_sec * 1000 + (tv.tv_usec + 500) / 1000;
         int64_t stop_millis = start_millis + max_time;
+
+        if (more_wait < 0)
+            more_wait = 0;
+
+        const int nfds = 1;
+        pollfd fds[nfds];
+        fds[0].fd = fd;
+        fds[0].events = POLLIN;
 
         int n = bufsz;
         int full_buffers = 0; // counts how often we completely filled the buffer
 
         void* bufstart = buf;
+        int retval;
+
+        int initial_wait = max_time;
+        if (max_time == INT_MAX)
+        {
+            retval = fcntl(fd, F_GETFL);
+            if (!checkError(retval))
+                return retval;
+            if ((retval & O_NONBLOCK) != 0)
+                initial_wait = 0;
+        }
+
+    wait_for_data:
+        retval = poll(fds, nfds, initial_wait);
+        if (retval < 0 && errno == EINTR)
+            goto wait_for_data;
+
+        if (retval == 0)
+        { // NOTE: On EOF, poll() always returns an event, so we don't ever get here on EOF.
+            if (report_ewouldblock)
+            {
+                errno = EWOULDBLOCK;
+                checkError(-1);
+                return -1;
+            }
+            else
+                return 0;
+        }
+        else if (retval < 0)
+        {
+            checkError(retval);
+            return retval;
+        }
 
         for (;;)
         {
-            int retval = ::read(fd, buf, n);
+            int poll_millis = max_time;
+            if (more_wait < poll_millis)
+                poll_millis = more_wait;
+
+        wait_for_more_data:
+            retval = poll(fds, nfds, poll_millis);
+            if (retval < 0 && errno == EINTR)
+                goto wait_for_more_data;
+
+            // don't call read() if nothing is ready, in case the file descriptor
+            // is blocking.
+            if (retval == 0)
+                break;
+
+            do
+                retval = ::read(fd, buf, n);
+            while (retval < 0 && errno == EINTR);
+
             if (retval == 0)
             { // means EOF because n > 0
                 eof = true;
@@ -443,43 +524,11 @@ class File
             }
             else if (retval < 0)
             {
-                if (errno == EINTR)
-                    continue; // skip the stop_millis check
-                if (errno == EAGAIN || errno == EWOULDBLOCK)
-                {
-                    if (more_wait > 0)
-                    {
-                    wait_a_bit:
-                        const int nfds = 1;
-                        pollfd fds[nfds];
-                        fds[0].fd = fd;
-                        fds[0].events = POLLIN;
-                        retval = poll(fds, nfds, more_wait);
-                        if (retval < 0 && errno == EINTR)
-                            goto wait_a_bit;
-                    }
-
-                    // retval > 0 means poll() returned an event
-                    // in all other cases (more_wait>0, poll timed out or had an error)
-                    // we treat the EWOULDBLOCK condition
-                    if (retval <= 0)
-                    {
-                        if (!report_ewouldblock || n != (int)bufsz ||
-                            full_buffers > 0) // Do not return EWOULDBLOCK error if we
-                            break;            // read at least 1 byte
-
-                        // make sure we don't report errno from poll()
-                        // also converts EAGAIN to EWOULDBLOCK
-                        errno = EWOULDBLOCK;
-                        checkError(retval);
-                        return retval;
-                    }
-                }
-                else
-                {
-                    checkError(retval);
-                    return retval;
-                }
+                // EAGAIN and EWOULDBLOCK are not possible here, because our
+                // initial poll() before the main loop made sure we get at least EOF
+                // or a byte.
+                checkError(retval);
+                return retval;
             }
             else
             {
@@ -498,13 +547,12 @@ class File
                 }
             }
 
-            if (max_time > 0)
-            {
-                gettimeofday(&tv, 0);
-                int64_t millis = (int64_t)tv.tv_sec * 1000 + (tv.tv_usec + 500) / 1000;
-                if (millis >= stop_millis)
-                    break;
-            }
+            gettimeofday(&tv, 0);
+            int64_t millis = (int64_t)tv.tv_sec * 1000 + (tv.tv_usec + 500) / 1000;
+            if (millis >= stop_millis)
+                break;
+            else
+                max_time = stop_millis - millis;
         }
 
         if (full_buffers == 0)

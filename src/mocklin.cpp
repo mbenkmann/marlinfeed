@@ -122,6 +122,7 @@ int main(int argc, char* argv[])
 
 void handle_connection(int fd)
 {
+    fprintf(stdout, "New connection\n");
     File peer("remote connection", fd);
     peer.autoClose();
     gcode::Reader reader(peer);
@@ -129,8 +130,11 @@ void handle_connection(int fd)
     while (0 != (line = reader.next()))
     {
         fprintf(stdout, "%s\n", line->data());
+        delete line;
     }
 
     if (peer.hasError()) // report if we ended due to an error and not EOF
         fprintf(stderr, "%s\n", peer.error());
+    else
+        fprintf(stdout, "Connection closed\n");
 }
