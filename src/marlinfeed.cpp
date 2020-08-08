@@ -161,8 +161,8 @@ bool handle(const char* infile, const char* printerdev, const char** e, int* iop
         return handle_error(e, serial->error(), iop, 2);
 
     if (S_ISSOCK(statbuf.st_mode))
-    {
-        // connect to socket
+    { // connect to socket
+        serial->connect();
     }
     else
     { // not a socket? Treat it as a TTY.

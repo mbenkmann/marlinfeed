@@ -36,15 +36,19 @@ template <typename T> class FIFO
         }
     };
 
+    int count;
     Node* entry;
     Node* exit;
 
   public:
     // Creates a new, empty FIFO.
-    FIFO() : entry(0), exit(0){};
+    FIFO() : count(0), entry(0), exit(0){};
 
     // Returns true if the buffer is empty.
     bool empty() { return exit == 0; };
+
+    // Returns the number of elements currently stored in this FIFO.
+    int size() { return count; }
 
     // Puts obj into the buffer.
     // ATTENTION! The pointer is used directly! Ownership transfers to the FIFO!
@@ -61,6 +65,7 @@ template <typename T> class FIFO
             entry = entry->next;
         }
         entry->obj = obj;
+        ++count;
     };
 
     // Removes and returns the oldest object in the buffer or NULL if the buffer is empty.
@@ -79,6 +84,7 @@ template <typename T> class FIFO
         T* ret = n->obj;
         n->obj = 0;
         delete n;
+        --count;
         return ret;
     };
 

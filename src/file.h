@@ -219,6 +219,42 @@ class File
         return checkError(retval);
     }
 
+    // Connects to a Unix Domain Socket on the file path passed to the constructor.
+    // If the File is already open, it is closed first.
+    // Another party must have used listen() and accept() on the same path
+    // for a connection to be established.
+    // Returns true iff the operation was successful. In that case you can
+    // read from and write to the other party.
+    //
+    // NOTE: If this function is used, the File will be automatically
+    // closed on destruction.
+    bool connect()
+    {
+        if (hasError())
+            return false;
+
+        close();
+
+        struct sockaddr_un addr;
+        if (strlen(fpath) >= sizeof(addr.sun_path))
+            return checkError(ENAMETOOLONG);
+
+        close();
+
+        int retval = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (checkError(retval))
+        {
+            fd = retval;
+            close_on_destruction = true;
+            addr.sun_family = AF_UNIX;
+            strncpy(addr.sun_path, fpath, sizeof(addr.sun_path));
+            retval = ::connect(fd, (sockaddr*)&addr, sizeof(addr));
+            checkError(retval);
+        }
+
+        return !hasError();
+    }
+
     // Binds a Unix Domain Socket on the file path passed to the constructor.
     // If the File is already open, it is closed first.
     // Returns true iff the operation was successful. In that case you can
@@ -549,7 +585,7 @@ class File
 
             gettimeofday(&tv, 0);
             int64_t millis = (int64_t)tv.tv_sec * 1000 + (tv.tv_usec + 500) / 1000;
-            if (millis >= stop_millis)
+            if (millis > stop_millis) // don't use >= because of max_time == 0
                 break;
             else
                 max_time = stop_millis - millis;
