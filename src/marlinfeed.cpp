@@ -47,6 +47,7 @@ const option::Descriptor usage[] = {
      "which must be compatible with Marlin's serial port protocol. printdev can "
      "be either a TTY or a Unix Domain Socket.\n"
      "Pass '-' or '/dev/stdin' to read from stdin.\n"
+     "If no infile is passed, '-' is assumed.\n"
      "Communication is echoed to stdout."
      "\n\n"
      "Options:"},
@@ -65,7 +66,7 @@ const option::Descriptor usage[] = {
 
 bool ioerror_next = false;
 
-bool handle(const char* infile, const char* printerdev, const char** e, int* iop);
+bool handle(File& out, File& serial, const char* infile, const char** e, int* iop);
 
 int main(int argc, char* argv[])
 {
@@ -111,15 +112,30 @@ int main(int argc, char* argv[])
         exit(1);
     }
 
-    for (int i = 0; i < parse.nonOptionsCount() - 1; ++i)
+    File out("stdout", 1);
+    out.setNonBlock(true);
+    // We don't exit for errors on stdout. It's just used for echoing.
+
+    File serial(parse.nonOption(parse.nonOptionsCount() - 1));
+
+    int i = 0;
+    if (parse.nonOptionsCount() == 1)
+        i = -1;
+
+    for (; i < parse.nonOptionsCount() - 1; ++i)
     {
         const char* error = 0;   // error message returned by handle()
-        int in_out_printer = -1; // 0: error occured on infile, 1: error occured on stdout,
-                                 // 2: error occured on printer device
-        if (!handle(parse.nonOption(i), parse.nonOption(parse.nonOptionsCount() - 1), &error, &in_out_printer))
+        int in_out_printer = -1; // 0: error occurred on infile,
+                                 // 1: error occured on stdout,
+                                 // 2: error occurred on printer device, do not reconnect
+                                 // 3: error occurred on printer device, try reconnecting
+        const char* infile = "-";
+        if (i >= 0)
+            infile = parse.nonOption(i);
+        if (!handle(out, serial, infile, &error, &in_out_printer))
         {
             fprintf(stderr, "%s\n", error);
-            if (!ioerror_next)
+            if (!ioerror_next || in_out_printer == 2)
                 exit(1);
         }
     }
@@ -132,8 +148,91 @@ bool handle_error(const char** e, const char* err_msg, int* iop, int which)
     return false;
 }
 
-bool handle(const char* infile, const char* printerdev, const char** e, int* iop)
+bool handle(File& out, File& serial, const char* infile, const char** e, int* iop)
 {
+    // (Re-)connect to printer if necessary.
+    if (serial.isClosed() || serial.EndOfFile() || serial.hasError())
+    {
+        serial.action("opening printer device");
+        struct stat statbuf;
+        if (!serial.stat(&statbuf))
+            return handle_error(e, serial.error(), iop, 2);
+
+        if (S_ISSOCK(statbuf.st_mode))
+        { // connect to socket
+            serial.connect();
+        }
+        else
+        { // not a socket? Treat it as a TTY.
+            serial.open();
+            serial.setupTTY();
+            if (serial.hasError())
+                return handle_error(e, serial.error(), iop, 2);
+        }
+
+        serial.action("connecting to printer");
+        serial.setNonBlock(true);
+        const int MAX_ATTEMPTS = 4;
+        int attempt = 0;
+
+        // Start by waiting up to 3s for something to appear on the line
+        serial.poll(POLLIN, 3000);
+
+        for (; attempt < MAX_ATTEMPTS; attempt++)
+        {
+            char buffy[2048];
+            int idx = serial.tail(buffy, sizeof(buffy) - 1 /* -1 for appending \n if nec. */, 500);
+            if (idx < 0)
+                return handle_error(e, serial.error(), iop, 2);
+
+            int n = idx;
+            if (idx > 0 && buffy[idx - 1] == '\n')
+                idx--; // make sure buffy[idx-1] is not the \n terminating the buffer
+            else
+                buffy[n++] = '\n'; // make sure buffy ends in a \n
+
+            // Put idx at start of last line
+            while (idx > 0 && buffy[idx - 1] != '\n')
+                --idx;
+
+            // buffy[idx] is the first character of the last line
+            // buffy[n-1] is \n terminating the last line
+            // buffy[n] is out of bounds
+
+            out.writeAll(buffy, n);
+
+            // When we get here for attempt 0, we haven't yet sent WRAP_AROUND_STRING, so any ok
+            // we may see is unrelated. Therefore we don't break for attempt == 0.
+            if (attempt > 0 && (buffy[idx] == 'o' && buffy[idx + 1] == 'k' && buffy[idx + 2] <= ' '))
+                break;
+
+            out.writeAll(MarlinBuf::WRAP_AROUND_STRING, MarlinBuf::WRAP_AROUND_STRING_LENGTH);
+
+            if (!serial.writeAll(MarlinBuf::WRAP_AROUND_STRING, MarlinBuf::WRAP_AROUND_STRING_LENGTH))
+                return handle_error(e, serial.error(), iop, 2);
+
+            usleep(1500000); // give the printer some time to reset itself
+        }
+
+        if (out.hasError())
+        {
+            if (out.errNo() == EWOULDBLOCK)
+                out.clearError(); // we don't care if we could not echo all
+            else
+            {
+                // Guess we won't be doing any echoing to stdout, anymore. Too bad.
+            }
+        }
+
+        serial.action("");
+
+        if (attempt == MAX_ATTEMPTS)
+            return handle_error(e, "Failed to establish connection with printer", iop, 2);
+    }
+
+    gcode::Reader gcode_serial(serial);
+    gcode_serial.whitespaceCompression(1);
+
     unique_ptr<File> in;
     if (infile[0] == '-' && infile[1] == 0)
     {
@@ -149,86 +248,6 @@ bool handle(const char* infile, const char* printerdev, const char** e, int* iop
     if (in->hasError())
         return handle_error(e, in->error(), iop, 0);
 
-    unique_ptr<File> out;
-    out.reset(new File("stdout", 1));
-    out->setNonBlock(true);
-    // We don't exit for errors on stdout. It's just used for echoing.
-
-    unique_ptr<File> serial(new File(printerdev));
-    serial->action("opening printer device");
-    struct stat statbuf;
-    if (!serial->stat(&statbuf))
-        return handle_error(e, serial->error(), iop, 2);
-
-    if (S_ISSOCK(statbuf.st_mode))
-    { // connect to socket
-        serial->connect();
-    }
-    else
-    { // not a socket? Treat it as a TTY.
-        serial->open();
-        serial->setupTTY();
-        if (serial->hasError())
-            return handle_error(e, serial->error(), iop, 2);
-    }
-
-    serial->action("connecting to printer");
-    serial->setNonBlock(true);
-    const int MAX_ATTEMPTS = 4;
-    int attempt = 0;
-    for (; attempt < MAX_ATTEMPTS; attempt++)
-    {
-        usleep(1000000); // give the printer some time to think
-        char buffy[1024];
-        int idx = serial->tail(buffy, sizeof(buffy) - 1 /* -1 for appending \n if nec. */, 1000);
-        if (idx < 0)
-            return handle_error(e, serial->error(), iop, 2);
-
-        int n = idx;
-        if (idx > 0 && buffy[idx - 1] == '\n')
-            idx--; // make sure buffy[idx-1] is not the \n terminating the buffer
-        else
-            buffy[n++] = '\n'; // make sure buffy ends in a \n
-
-        // Put idx at start of last line
-        while (idx > 0 && buffy[idx - 1] != '\n')
-            --idx;
-
-        // buffy[idx] is the first character of the last line
-        // buffy[n-1] is \n terminating the last line
-        // buffy[n] is out of bounds
-
-        out->writeAll(buffy, n);
-
-        // When we get here for attempt 0, we haven't yet sent WRAP_AROUND_STRING, so any ok
-        // we may see is unrelated. Therefore we don't break for attempt == 0.
-        if (attempt > 0 && (buffy[idx] == 'o' && buffy[idx + 1] == 'k' && buffy[idx + 2] <= ' '))
-            break;
-
-        out->writeAll(MarlinBuf::WRAP_AROUND_STRING, MarlinBuf::WRAP_AROUND_STRING_LENGTH);
-
-        if (!serial->writeAll(MarlinBuf::WRAP_AROUND_STRING, MarlinBuf::WRAP_AROUND_STRING_LENGTH))
-            return handle_error(e, serial->error(), iop, 2);
-    }
-
-    if (out->hasError())
-    {
-        if (out->errNo() == EWOULDBLOCK)
-            out->clearError(); // we don't care if we could not echo all
-        else
-        {
-            // Guess we won't be doing any echoing to stdout, anymore. Too bad.
-        }
-    }
-
-    serial->action("");
-
-    if (attempt == MAX_ATTEMPTS)
-        return handle_error(e, "Failed to establish connection with printer", iop, 2);
-
-    gcode::Reader gcode_serial(*serial);
-    gcode_serial.whitespaceCompression(1);
-
     in->action("reading source gcode");
     gcode::Reader gcode_in(*in);
     gcode_in.whitespaceCompression(1); // CR-10's stock version of Marlin requires a space between command and params
@@ -241,18 +260,32 @@ bool handle(const char* infile, const char* printerdev, const char** e, int* iop
     MarlinBuf marlinbuf;
     int idx;
 
+    const int nfds = 3;
+    pollfd fds[nfds];
+    fds[0].fd = serial.fileDescriptor();
+    fds[0].events = POLLIN | POLLOUT;
+    fds[1].fd = out.fileDescriptor();
+    fds[1].events = POLLIN | POLLOUT;
+    fds[2].fd = in->fileDescriptor();
+    fds[2].events = POLLIN | POLLOUT;
+
     for (;;)
     {
-        // TODO: Save CPU cycles by doing a poll() on the involved file descriptors
+        // Save CPU cycles by doing a poll() on the involved file descriptors
+        poll(fds, nfds, -1);
 
-        serial->action("reading printer response");
+        serial.action("reading printer response");
         gcode::Line* input;
+        bool ignore_ok = false;
         while (0 != (input = gcode_serial.next()))
         {
             if (input->startsWith("ok\b"))
             {
-                if (!marlinbuf.ack())
-                    return handle_error(e, "Spurious 'ok' received from printer", iop, 2);
+                if (ignore_ok)
+                    ignore_ok = false;
+                else if (!marlinbuf.ack())
+                    stdoutbuf.put( // Don't exit for this error. The user knows best.
+                        new gcode::Line("WARNING! Spurious 'ok'! Is a user manually controlling the printer?"));
             }
             else if (input->startsWith("Error:"))
             {
@@ -266,7 +299,9 @@ bool handle(const char* infile, const char* printerdev, const char** e, int* iop
                     line = -1;
 
                 if (!marlinbuf.seek(line))
-                    return handle_error(e, "Illegal 'Resend' received from printer", iop, 2);
+                    return handle_error(e, "Illegal 'Resend' received from printer", iop, 3);
+
+                ignore_ok = true; // ignore the ok that accompanies the Resend
             }
 
             stdoutbuf.put(input); // echo to stdout
@@ -292,43 +327,43 @@ bool handle(const char* infile, const char* printerdev, const char** e, int* iop
                 break;
         }
 
-        serial->action("sending gcode to printer");
-        while (marlinbuf.hasNext() && !serial->hasError())
+        serial.action("sending gcode to printer");
+        while (marlinbuf.hasNext() && !serial.hasError())
         {
             gcode::Line* gcode_to_send = new gcode::Line(marlinbuf.next());
             stdoutbuf.put(gcode_to_send); // echo to stdout
-            serial->writeAll(gcode_to_send->data(), gcode_to_send->length());
+            serial.writeAll(gcode_to_send->data(), gcode_to_send->length());
         }
 
-        while (!out->hasError() && !stdoutbuf.empty())
+        while (!out.hasError() && !stdoutbuf.empty())
         {
             gcode::Line& outline = stdoutbuf.peek();
             size_t nrest;
-            out->writeAll(outline.data(), outline.length(), &nrest);
+            out.writeAll(outline.data(), outline.length(), &nrest);
             if (nrest == 0)
                 delete stdoutbuf.get();
             else
                 outline.slice(-nrest);
         }
 
-        if (out->errNo() == EWOULDBLOCK)
-            out->clearError(); // Try again later.
+        if (out.errNo() == EWOULDBLOCK)
+            out.clearError(); // Try again later.
         // we don't exit for errors on stdout because it's only for echoing.
 
         if (in->hasError())
             return handle_error(e, in->error(), iop, 0);
 
-        if (in->EndOfFile() && next_gcode == 0 && marlinbuf.needsAck())
+        if (in->EndOfFile() && next_gcode == 0 && !marlinbuf.needsAck())
         {
             *iop = 0;
             *e = "EOF on GCode source";
             return true;
         }
 
-        if (serial->hasError())
-            return handle_error(e, serial->error(), iop, 2);
+        if (serial.hasError())
+            return handle_error(e, serial.error(), iop, 3);
 
-        if (serial->EndOfFile())
-            return handle_error(e, "EOF on printer connection", iop, 2);
+        if (serial.EndOfFile())
+            return handle_error(e, "EOF on printer connection", iop, 3);
     }
 }

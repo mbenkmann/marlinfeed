@@ -226,7 +226,7 @@ class MarlinBuf
     bool hasNext() { return i_out != i_in; }
 
     // Returns true if there is still a line that has been sent but not ack()d.
-    bool needsAck() { return i_free == i_out; }
+    bool needsAck() { return i_free != i_out; }
 
     // Returns the next line to be sent over the wire.
     // If the pointer len is passed as non-null, the length of the

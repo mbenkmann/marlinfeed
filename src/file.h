@@ -129,6 +129,13 @@ class File
     // so errNo() will be 0.
     bool EndOfFile() { return eof; }
 
+    // Returns true if this File is not open.
+    // NOTE: A file descriptor passed into the constructor is assumed to be open.
+    bool isClosed() { return fd < 0; }
+
+    // Returns the file descriptor of this file if it is open, otherwise < 0.
+    int fileDescriptor() { return fd; }
+
     // Clears a pending error so that future functions will not be skipped automatically.
     // This only makes sense for certain kinds of errors, e.g. EWOULDBLOCK, that leave
     // the file descriptor in a functioning state.
@@ -234,7 +241,8 @@ class File
             return false;
 
         struct sockaddr_un addr;
-        if (strlen(fpath) >= sizeof(addr.sun_path))
+        size_t fpath_len = strlen(fpath);
+        if (fpath_len > sizeof(addr.sun_path) - 1) // -1 for 0 terminator
             return checkError(ENAMETOOLONG);
 
         close();
@@ -245,7 +253,8 @@ class File
             fd = retval;
             close_on_destruction = true;
             addr.sun_family = AF_UNIX;
-            strncpy(addr.sun_path, fpath, sizeof(addr.sun_path));
+            memcpy(addr.sun_path, fpath, fpath_len);
+            addr.sun_path[fpath_len] = 0;
             retval = ::connect(fd, (sockaddr*)&addr, sizeof(addr));
             checkError(retval);
         }
@@ -343,6 +352,17 @@ class File
         }
 
         return err == 0;
+    }
+
+    // Polls the file descriptor of this File for events.
+    // See poll(2) for a description of timeout and return value.
+    int poll(short events, int timeout_millis)
+    {
+        const int nfds = 1;
+        pollfd fds[nfds];
+        fds[0].fd = fd;
+        fds[0].events = events;
+        return ::poll(fds, nfds, timeout_millis);
     }
 
     // Writes n bytes from buf to the file. Unlike the system call write(2), this function
@@ -512,7 +532,7 @@ class File
         }
 
     wait_for_data:
-        retval = poll(fds, nfds, initial_wait);
+        retval = ::poll(fds, nfds, initial_wait);
         if (retval < 0 && errno == EINTR)
             goto wait_for_data;
 
@@ -540,7 +560,7 @@ class File
                 poll_millis = more_wait;
 
         wait_for_more_data:
-            retval = poll(fds, nfds, poll_millis);
+            retval = ::poll(fds, nfds, poll_millis);
             if (retval < 0 && errno == EINTR)
                 goto wait_for_more_data;
 

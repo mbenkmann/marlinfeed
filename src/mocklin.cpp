@@ -36,23 +36,37 @@
 using gcode::Line;
 using std::unique_ptr;
 
+extern const char* WELCOME_TEXT;
+extern const char* WELCOME_TEXT2;
+
 enum optionIndex
 {
     UNKNOWN,
     HELP,
+    RESEND
 };
-const option::Descriptor usage[] = {{UNKNOWN, 0, "", "", Arg::Unknown,
-                                     "USAGE: mocklin [options] printdev\n\n"
-                                     "printdev must be a path that does not exist or refers to a socket. "
-                                     "It will be replaced by a new socket on which mocklin will listen and "
-                                     "pretend to be a Marlin-based 3D printer."
-                                     "\n\n"
-                                     "Options:"},
-                                    {HELP, 0, "", "help", Arg::None, "  \t--help  \tPrint usage and exit."},
-                                    {UNKNOWN, 0, "", "", Arg::None, "\n"},
-                                    {0, 0, 0, 0, 0, 0}};
+const option::Descriptor usage[] =
+
+    {{UNKNOWN, 0, "", "", Arg::Unknown,
+      "USAGE: mocklin [options] printdev\n\n"
+      "printdev must be a path that does not exist or refers to a socket. "
+      "It will be replaced by a new socket on which mocklin will listen and "
+      "pretend to be a Marlin-based 3D printer."
+      "\n\n"
+      "Options:"},
+     {HELP, 0, "", "help", Arg::None, "  \t--help  \tPrint usage and exit."},
+     {RESEND, 0, "", "resend", Arg::NumberPair,
+      "  \t--resend[=<when>,<what>]"
+      "  \tEvery other time mocklin receives a command with line number <when>, "
+      "mocklin will request a resend of line number <what>."},
+     {UNKNOWN, 0, "", "", Arg::None, "\n"},
+     {0, 0, 0, 0, 0, 0}};
 
 void handle_connection(int fd);
+
+long resend_when = LONG_MIN;
+long resend_what = LONG_MIN;
+bool resend_toggle = true;
 
 int main(int argc, char* argv[])
 {
@@ -83,7 +97,10 @@ int main(int argc, char* argv[])
         switch (opt.index())
         {
             case HELP:
-                // not possible, because handled further above and exits the program
+            // not possible, because handled further above and exits the program
+            case RESEND:
+                resend_when = strtol(opt.arg, 0, 10);
+                resend_what = strtol(strchr(opt.arg, ',') + 1, 0, 10);
             case UNKNOWN:
                 // not possible because Arg::Unknown returns ARG_ILLEGAL
                 // which aborts the parse with an error
@@ -188,6 +205,19 @@ void gcode_line_error(File& peer, const char* err, bool doFlush = true)
         flush_and_request_resend(peer);
 }
 
+void resend_request(File& peer, long resend_when, long resend_what)
+{
+    char sendbuf[1024];
+    int len =
+        snprintf(sendbuf, sizeof(sendbuf), "%sResend request triggered by line: %ld\n", MSG_ERRORMAGIC, resend_when);
+    if (len >= (int)sizeof(sendbuf))
+        len = sizeof(sendbuf) - 1; // -1 because of 0 terminator
+    peer.writeAll(sendbuf, len);
+    fprintf(stdout, "%s", sendbuf);
+    gcode_LastN = resend_what - 1;
+    flush_and_request_resend(peer);
+}
+
 void unknown_command_error(File& peer, const char* gcode)
 {
     char sendbuf[1024];
@@ -258,6 +288,8 @@ void process_next_command(File& peer)
             break;
         case M + 110: // Set Line Number
             break;    // already handled
+        case M + 115: // Firmware Info
+            break;
         case M + 140: // Set Bed Temperature
             break;
         case M + 190: // Wait for Bed Temperature
@@ -293,6 +325,11 @@ void handle_connection(int fd)
     peer.setNonBlock(true);
     gcode::Reader reader(peer);
 
+    sleep(1); // Wait a little because that's what a normal printer does
+    peer.writeAll(WELCOME_TEXT, strlen(WELCOME_TEXT));
+    sleep(1); // wait before reporting SD card state
+    peer.writeAll(WELCOME_TEXT2, strlen(WELCOME_TEXT2));
+
     for (;;)
     {
         // compare Marlin function get_serial_commands()
@@ -326,6 +363,16 @@ void handle_connection(int fd)
                 {
                     gcode_line_error(peer, MSG_ERR_LINE_NO);
                     continue;
+                }
+
+                if (gcode_N == resend_when)
+                {
+                    resend_toggle = !resend_toggle;
+                    if (!resend_toggle)
+                    {
+                        resend_request(peer, resend_when, resend_what);
+                        continue;
+                    }
                 }
 
                 const char* apos = strrchr(command, '*');
@@ -370,3 +417,38 @@ void handle_connection(int fd)
     else
         fprintf(stdout, "Connection closed\n");
 }
+
+const char* WELCOME_TEXT =
+    "start\n"
+    "echo: External Reset\n"
+    "Marlin \n"
+    "echo: Last Updated: 2015-12-01 12:00 | Author: (none, default config)\n"
+    "Compiled: Sep  4 2017\n"
+    "echo: Free Memory: 1454  PlannerBufferBytes: 1232\n"
+    "echo:Hardcoded Default Settings Loaded\n"
+    "echo:Steps per unit:\n"
+    "echo:  M92 X80.00 Y80.00 Z400.00 E93.00\n"
+    "echo:Maximum feedrates (mm/s):\n"
+    "echo:  M203 X300.00 Y300.00 Z5.00 E25.00\n"
+    "echo:Maximum Acceleration (mm/s2):\n"
+    "echo:  M201 X1000 Y1000 Z100 E5000\n"
+    "echo:Accelerations: P=printing, R=retract and T=travel\n"
+    "echo:  M204 P500.00 R500.00 T1000.00\n"
+    "echo:Advanced variables: S=Min feedrate (mm/s), T=Min travel feedrate (mm/s), B=minimum segment time (ms), "
+    "X=maximum XY jerk (mm/s),  Z=maximum Z jerk (mm/s),  E=maximum E jerk (mm/s)\n"
+    "echo:  M205 S0.00 T0.00 B20000 X20.00 Z0.40 E5.00\n"
+    "echo:Home offset (mm):\n"
+    "echo:  M206 X0.00 Y0.00 Z0.00\n"
+    "echo:Material heatup parameters:\n"
+    "echo:  M145 M0 H185 B45 F0\n"
+    "echo:  M145 M1 H240 B110 F0\n"
+    "echo:PID settings:\n"
+    "echo:  M301 P22.20 I1.08 D114.00 C100.00 L20\n"
+    "echo:Filament settings: Disabled\n"
+    "echo:  M200 D3.00\n"
+    "echo:  M200 D0\n";
+
+const char* WELCOME_TEXT2 = "echo:SD card ok\n"
+                            "Init power off infomation.\n"
+                            "size: \n"
+                            "591\n";

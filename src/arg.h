@@ -58,15 +58,37 @@ struct Arg : public option::Arg
 
     static option::ArgStatus Numeric(const option::Option& option, bool msg)
     {
-        char* endptr = 0;
-        if (option.arg != 0 && strtol(option.arg, &endptr, 10))
+        if (option.arg != 0)
         {
+            char* endptr = 0;
+            strtol(option.arg, &endptr, 10);
+            if (endptr != option.arg && *endptr == 0)
+                return option::ARG_OK;
         };
-        if (endptr != option.arg && *endptr == 0)
-            return option::ARG_OK;
 
         if (msg)
             printError("Option '", option, "' requires a numeric argument\n");
+        return option::ARG_ILLEGAL;
+    }
+
+    static option::ArgStatus NumberPair(const option::Option& option, bool msg)
+    {
+        if (option.arg != 0)
+        {
+            char* endptr = 0;
+            strtol(option.arg, &endptr, 10);
+            if (endptr != option.arg && *endptr == ',')
+            {
+                endptr++;
+                char* endptr2 = 0;
+                strtol(endptr, &endptr2, 10);
+                if (endptr2 != endptr && *endptr2 == 0)
+                    return option::ARG_OK;
+            }
+        };
+
+        if (msg)
+            printError("Option '", option, "' requires an argument of the form <number>,<number>\n");
         return option::ARG_ILLEGAL;
     }
 };

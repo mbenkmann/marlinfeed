@@ -30,7 +30,7 @@
             "type": "cppdbg",
             "request": "launch",
             "program": "mocklin",
-            "args": ["test/mocklins_dirty_sock"],
+            "args": ["--resend=3,3","test/mocklins_dirty_sock"],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "environment": [],
