@@ -18,6 +18,14 @@
             "problemMatcher": [
                 "$gcc"
             ]
+        },
+        {
+            "label": "make_marlinfeed",
+            "type": "shell",
+            "command": "make 'OPTIMIZE=$(DEBUG)' marlinfeed",
+            "problemMatcher": [
+                "$gcc"
+            ]
         }
 
     ]

@@ -21,6 +21,7 @@
 
 #include <errno.h>
 #include <memory>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -55,6 +56,8 @@ void handle_connection(int fd);
 
 int main(int argc, char* argv[])
 {
+    signal(SIGPIPE, SIG_IGN);
+
     argc -= (argc > 0);
     argv += (argc > 0); // skip program name argv[0] if present
     option::Stats stats(usage, argc, argv);
@@ -152,6 +155,7 @@ void ok_to_send(File& peer)
     if (len >= (int)sizeof(buf))
         len = sizeof(buf) - 1; // -1 because of 0 terminator
     peer.writeAll(buf, len);
+    fprintf(stdout, "%s", buf);
 }
 
 /**
@@ -169,6 +173,7 @@ void flush_and_request_resend(File& peer)
     if (len >= (int)sizeof(buf))
         len = sizeof(buf) - 1; // -1 because of 0 terminator
     peer.writeAll(buf, len);
+    fprintf(stdout, "%s", buf);
 }
 
 void gcode_line_error(File& peer, const char* err, bool doFlush = true)
@@ -178,6 +183,7 @@ void gcode_line_error(File& peer, const char* err, bool doFlush = true)
     if (len >= (int)sizeof(sendbuf))
         len = sizeof(sendbuf) - 1; // -1 because of 0 terminator
     peer.writeAll(sendbuf, len);
+    fprintf(stdout, "%s", sendbuf);
     if (doFlush)
         flush_and_request_resend(peer);
 }
@@ -189,6 +195,7 @@ void unknown_command_error(File& peer, const char* gcode)
     if (len >= (int)sizeof(sendbuf))
         len = sizeof(sendbuf) - 1; // -1 because of 0 terminator
     peer.writeAll(sendbuf, len);
+    fprintf(stdout, "%s", sendbuf);
 }
 
 void process_next_command(File& peer)
@@ -225,9 +232,49 @@ void process_next_command(File& peer)
 
     switch (command)
     {
+        case G + 0: // Linear Move
+        case G + 1: // Linear Move
+            break;
+        case G + 28: // Auto Home
+            break;
+        case G + 90: // Absolute Positioning
+            break;
+        case G + 91: // Relative Positioning
+            break;
+        case G + 92: // Set Position
+            break;
+        case M + 82: // E Absolute
+            break;
+        case M + 18: // Disable Steppers
+        case M + 84: // Disable Steppers
+            break;
+        case M + 104: // Set Hotend Temperature
+            break;
+        case M + 105: // Report Temperatures
+            break;
+        case M + 106: // Set Fan Speed
+            break;
+        case M + 109: // Wait for Hotend Temperature
+            break;
         case M + 110: // Set Line Number
             break;    // already handled
+        case M + 140: // Set Bed Temperature
+            break;
+        case M + 190: // Wait for Bed Temperature
+            break;
+        case M + 201: // Set Print Max Acceleration
+            break;
+        case M + 203: // Set Max Feedrate
+            break;
+        case M + 204: // Set Starting Acceleration
+            break;
+        case M + 205: // Set Advanced Settings
+            break;
         case M + 209: // Set Auto Retract
+            break;
+        case M + 220: // Set Feedrate Percentage
+            break;
+        case M + 221: // Set Flow Percentage
             break;
         default:
             unknown_command_error(peer, gcode);

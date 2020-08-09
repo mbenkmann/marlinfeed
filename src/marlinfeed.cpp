@@ -178,8 +178,9 @@ bool handle(const char* infile, const char* printerdev, const char** e, int* iop
     int attempt = 0;
     for (; attempt < MAX_ATTEMPTS; attempt++)
     {
+        usleep(1000000); // give the printer some time to think
         char buffy[1024];
-        int idx = serial->tail(buffy, sizeof(buffy) - 1 /* -1 for appending \n if nec. */, 100, 10000);
+        int idx = serial->tail(buffy, sizeof(buffy) - 1 /* -1 for appending \n if nec. */, 1000);
         if (idx < 0)
             return handle_error(e, serial->error(), iop, 2);
 
@@ -230,6 +231,7 @@ bool handle(const char* infile, const char* printerdev, const char** e, int* iop
 
     in->action("reading source gcode");
     gcode::Reader gcode_in(*in);
+    gcode_in.whitespaceCompression(1); // CR-10's stock version of Marlin requires a space between command and params
     gcode::Line* next_gcode = 0;
 
     // stdoutbuf is a FIFO buffer that stores output lines for pushing to stdout
@@ -316,7 +318,7 @@ bool handle(const char* infile, const char* printerdev, const char** e, int* iop
         if (in->hasError())
             return handle_error(e, in->error(), iop, 0);
 
-        if (in->EndOfFile() && next_gcode == 0)
+        if (in->EndOfFile() && next_gcode == 0 && marlinbuf.needsAck())
         {
             *iop = 0;
             *e = "EOF on GCode source";

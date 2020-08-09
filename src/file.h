@@ -233,8 +233,6 @@ class File
         if (hasError())
             return false;
 
-        close();
-
         struct sockaddr_un addr;
         if (strlen(fpath) >= sizeof(addr.sun_path))
             return checkError(ENAMETOOLONG);
@@ -404,7 +402,8 @@ class File
     // max_time: If > 0, this is the maximum number of milliseconds the function
     //             will take, regardless if waiting or reading.
     //             Even if the file descriptor is non-blocking, the function will
-    //             wait up to this time for data.
+    //             wait up to this time for a first byte of data (because more_data
+    //             only kicks in after the 1st byte has been received).
     //           If < 0 the function will continue reading until either more_wait
     //             or EOF or an error stops it. If the file is non-blocking and no
     //             data is immediately available, this will be reported as an
@@ -443,7 +442,8 @@ class File
     // max_time: If > 0, this is the maximum number of milliseconds the function
     //             will take, regardless if waiting or reading.
     //             Even if the file descriptor is non-blocking, the function will
-    //             wait up to this time for data.
+    //             wait up to this time for a first byte of data (because more_data
+    //             only kicks in after the 1st byte has been received).
     //           If < 0 the function will continue reading until either more_wait
     //             or EOF or an error stops it. If the file is non-blocking and no
     //             data is immediately available, this will be reported as an

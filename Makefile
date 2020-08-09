@@ -1,7 +1,7 @@
 CXX=g++
 CXXFLAGS=-W -Wall -g -fmessage-length=0 -std=gnu++11
 OPTIMIZE=-O2 -fomit-frame-pointer
-DEBUG=$(CXXFLAGS) -O0 -lmcheck
+DEBUG=-O0 -lmcheck
 
 all: marlinfeed mocklin
 
