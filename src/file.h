@@ -24,6 +24,7 @@
 
 #include <fcntl.h>
 #include <limits.h>
+#include <netinet/in.h>
 #include <poll.h>
 #include <stdio.h>
 #include <string.h>
@@ -199,7 +200,7 @@ class File
         return checkError(fd);
     }
 
-    // Sets whether the File with close its file descriptor automatically on
+    // Sets whether the File will close its file descriptor automatically on
     // destruction. This is automatically set if the File descriptor was
     // obtained via a call to this File's listen() or open(), but has to
     // be set manually if the file descriptor was passed into the constructor.
@@ -243,8 +244,10 @@ class File
         struct sockaddr_un addr;
         size_t fpath_len = strlen(fpath);
         if (fpath_len > sizeof(addr.sun_path) - 1) // -1 for 0 terminator
-            return checkError(ENAMETOOLONG);
-
+        {
+            errno = ENAMETOOLONG;
+            return checkError(-1);
+        }
         close();
 
         int retval = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -262,7 +265,18 @@ class File
         return !hasError();
     }
 
-    // Binds a Unix Domain Socket on the file path passed to the constructor.
+    // If the file path passed to the constructor DOES NOT CONTAIN ':', binds a
+    // Unix Domain Socket on the path.
+    //
+    // If the file path DOES CONTAIN ':', binds an IPv6 socket to the port
+    // number following the last ':' in the name. If the string before that
+    // last colon is "localhost", "127.0.0.1" or "::1", the socket will listen
+    // only on the loopback interface. Otherwise it will listen on all interfaces
+    // regardless of what the name is. NOTE: Support for name resolution and
+    // interface determination may be implemented in the future. For compatibility
+    // you should only use "127.0.0.1:<port>", "localhost:<port>", "::1:<port>"
+    // and ":<port>".
+    //
     // If the File is already open, it is closed first.
     // Returns true iff the operation was successful. In that case you can
     // use accept() to accept connections.
@@ -278,19 +292,59 @@ class File
             return false;
 
         struct sockaddr_un addr;
-        if (strlen(fpath) >= sizeof(addr.sun_path))
-            return checkError(ENAMETOOLONG);
+        size_t fpath_len = strlen(fpath);
+        if (fpath_len > sizeof(addr.sun_path) - 1) // -1 for 0 terminator
+        {
+            errno = ENAMETOOLONG;
+            return checkError(-1);
+        }
 
         close();
 
-        int retval = socket(AF_UNIX, SOCK_STREAM, 0);
+        const char* colon = strrchr(fpath, ':');
+        int retval;
+
+        if (colon == 0)
+            retval = socket(AF_UNIX, SOCK_STREAM, 0);
+        else
+            retval = socket(AF_INET6, SOCK_STREAM, 0);
+
         if (checkError(retval))
         {
             fd = retval;
             close_on_destruction = true;
-            addr.sun_family = AF_UNIX;
-            strncpy(addr.sun_path, fpath, sizeof(addr.sun_path));
-            retval = bind(fd, (sockaddr*)&addr, sizeof(addr));
+
+            if (colon == 0)
+            {
+                addr.sun_family = AF_UNIX;
+                memcpy(addr.sun_path, fpath, fpath_len);
+                addr.sun_path[fpath_len] = 0;
+                retval = bind(fd, (sockaddr*)&addr, sizeof(addr));
+            }
+            else
+            {
+                char* endptr;
+                long port = strtol(colon + 1, &endptr, 10);
+                if (colon[1] == 0 || port <= 0 || port > 65535 || *endptr != 0)
+                {
+                    errno = EADDRNOTAVAIL;
+                    return checkError(-1);
+                }
+
+                int colon_idx = colon - fpath;
+                struct sockaddr_in6 addr6;
+                addr6.sin6_family = AF_INET6;
+                addr6.sin6_port = htons(port);
+                addr6.sin6_flowinfo = 0;
+                if (strncmp(fpath, "localhost", colon_idx) == 0 || strncmp(fpath, "127.0.0.1", colon_idx) == 0 ||
+                    strncmp(fpath, "::1", colon_idx) == 0)
+                    addr6.sin6_addr = IN6ADDR_LOOPBACK_INIT;
+                else
+                    addr6.sin6_addr = IN6ADDR_ANY_INIT;
+                addr6.sin6_scope_id = 0;
+                retval = bind(fd, (sockaddr*)&addr6, sizeof(addr6));
+            }
+
             if (checkError(retval))
                 checkError(::listen(fd, backlog));
         }
@@ -302,15 +356,24 @@ class File
     // can be used to accept a connection.
     // Returns a file descriptor for the accepted connection or -1 if an error
     // occurred.
-    // NOTE: EINTR is handled transparently and will never be returned as error.
+    // NOTES:
+    //   * EINTR is handled transparently and will never be returned as error.
+    //   * If the socket is non-blocking and no connection is pending,
+    //     the error condition EWOULDBLOCK is reported. Don't forget to call
+    //     clearError() before calling accept() again.
     int accept()
     {
         if (hasError())
             return -1;
     eintr:
         int retval = ::accept(fd, 0, 0);
-        if (retval < 0 && errno == EINTR)
-            goto eintr;
+        if (retval < 0)
+        {
+            if (errno == EINTR)
+                goto eintr;
+            if (errno == EAGAIN) // translate EAGAIN to EWOULDBLOCK
+                errno = EWOULDBLOCK;
+        }
 
         checkError(retval);
         return retval;
