@@ -25,8 +25,11 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/types.h>
 #include <time.h>
+#include <utime.h>
 
+#include "dirscanner.h"
 #include "fifo.h"
 #include "file.h"
 #include "gcode.h"
@@ -50,6 +53,7 @@ void file_tests();
 void gcode_tests();
 void fifo_tests();
 void marlinbuf_tests();
+void dirscanner_tests();
 
 File out("stdout", 1);
 
@@ -57,6 +61,7 @@ int main()
 {
     out.writeAll(WELCOME_MSG, strlen(WELCOME_MSG));
 
+    dirscanner_tests();
     gcode_tests();
     marlinbuf_tests();
     file_tests();
@@ -64,6 +69,31 @@ int main()
 
     out.writeAll(BYE_MSG, strlen(BYE_MSG));
 };
+
+void dirscanner_tests()
+{
+    FIFO<char> files;
+    DirScanner dirScan;
+    assert(dirScan.empty());
+    dirScan.refill(files);
+    assert(files.empty());
+    dirScan.addDir("test");
+    sleep(1);
+    dirScan.refill(files);
+    assert(files.empty());
+    for (int i = 0; i < 5; i++)
+    {
+        utime("test/intro.gcode", 0);
+        sleep(1);
+        dirScan.refill(files);
+        assert(files.empty()); // still empty because file not ripe
+    }
+    dirScan.refill(files);
+    assert(files.empty()); // still empty because file not ripe
+    usleep(1000 * DirScanner::MIN_AGE);
+    dirScan.refill(files);
+    assert(files.size() == 1);
+}
 
 void gcode_tests()
 {
@@ -337,6 +367,7 @@ void file_tests()
     assert(bufrest == (const void*)&bigblock[sizeof(bigblock)]);
     assert(!pw.hasError());
 
+    sleep(1);
     assert(pw.setNonBlock(true));
     assert(!pw.writeAll(bigblock, sizeof(bigblock), &nrest, &bufrest));
     assert(nrest > 0 && nrest < sizeof(bigblock));
@@ -456,4 +487,22 @@ void file_tests()
     assert(unlink_test.unlink());
     assert(unlink_test.close());
     assert(!unlink_test.stat(&statbuf));
+
+    File illport("localhost:-99");
+    assert(!illport.listen());
+    assert(illport.errNo() == EADDRNOTAVAIL);
+
+    char* longstr = (char*)malloc(9999);
+    memset(longstr, 'x', 9999);
+    longstr[9998] = 0;
+    File ftoolong(longstr);
+    assert(!ftoolong.connect());
+    assert(ftoolong.errNo() == ENAMETOOLONG);
+    ftoolong.clearError();
+    assert(!ftoolong.listen());
+    assert(ftoolong.errNo() == ENAMETOOLONG);
+
+    File notallowed("localhost:20"); // We're assuming the person running the test can't bind to port 20
+    assert(!notallowed.listen());
+    assert(notallowed.errNo() == EACCES);
 };
