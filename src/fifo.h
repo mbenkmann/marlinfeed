@@ -50,6 +50,21 @@ template <typename T> class FIFO
     // Returns the number of elements currently stored in this FIFO.
     int size() { return count; }
 
+    // Calls visitor's operator() on every T* in the FIFO from oldest
+    // to newest. If the operator() returns false, iteration stops.
+    // Returns visitor.
+    // NOTE: visitor() will not be called with NULL as an argument. If the
+    // FIFO is empty, it will not be called at all.
+    template <typename V> V& visit(V& visitor)
+    {
+        for (Node* n = exit; n != 0; n = n->next)
+        {
+            if (!visitor(n->obj))
+                break;
+        }
+        return visitor;
+    }
+
     // Puts obj into the buffer.
     // ATTENTION! The pointer is used directly! Ownership transfers to the FIFO!
     void put(T* obj)
