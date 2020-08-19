@@ -323,26 +323,33 @@ class File
             }
             else
             {
+                int colon_idx = colon - fpath;
+                bool localhost = colon_idx > 0 &&
+                                 (strncmp(fpath, "localhost", colon_idx) == 0 ||
+                                  strncmp(fpath, "127.0.0.1", colon_idx) == 0 || strncmp(fpath, "::1", colon_idx) == 0);
                 char* endptr;
                 long port = strtol(colon + 1, &endptr, 10);
-                if (colon[1] == 0 || port <= 0 || port > 65535 || *endptr != 0)
+                if ((!localhost && colon_idx > 0) || colon[1] == 0 || port <= 0 || port > 65535 || *endptr != 0)
                 {
                     errno = EADDRNOTAVAIL;
                     return checkError(-1);
                 }
 
-                int colon_idx = colon - fpath;
                 struct sockaddr_in6 addr6;
                 addr6.sin6_family = AF_INET6;
                 addr6.sin6_port = htons(port);
                 addr6.sin6_flowinfo = 0;
-                if (strncmp(fpath, "localhost", colon_idx) == 0 || strncmp(fpath, "127.0.0.1", colon_idx) == 0 ||
-                    strncmp(fpath, "::1", colon_idx) == 0)
+
+                if (localhost)
                     addr6.sin6_addr = IN6ADDR_LOOPBACK_INIT;
                 else
                     addr6.sin6_addr = IN6ADDR_ANY_INIT;
                 addr6.sin6_scope_id = 0;
-                retval = bind(fd, (sockaddr*)&addr6, sizeof(addr6));
+                int on = 1;
+
+                retval = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+                if (retval == 0)
+                    retval = bind(fd, (sockaddr*)&addr6, sizeof(addr6));
             }
 
             if (checkError(retval))

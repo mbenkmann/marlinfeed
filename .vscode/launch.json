@@ -51,7 +51,7 @@
             "type": "cppdbg",
             "request": "launch",
             "program": "marlinfeed",
-            "args": ["-","test/mocklins_dirty_sock"],
+            "args": [":8080/upload","test/mocklins_dirty_sock"],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "environment": [],
@@ -63,6 +63,16 @@
                     "text": "-enable-pretty-printing",
                     "ignoreFailures": true
                 }
+                // ,                {
+                //     "description": "Debug child after a fork",
+                //     "text": "set follow-fork-mode child",
+                //     "ignoreFailures": false
+                // }
+                // ,{
+                //     "description": "Keep control of both processes after fork",
+                //     "text": "set detach-on-fork off",
+                //     "ignoreFailures": false
+                // }
             ],
             "preLaunchTask": "make_marlinfeed",
             "miDebuggerPath": "/usr/bin/gdb"
