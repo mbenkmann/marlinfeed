@@ -30,6 +30,7 @@ template <typename T> class FIFO
         T* obj;
         Node* next;
         Node() : obj(0), next(0){};
+        Node(T* o, Node* n) : obj(o), next(n) {}
         ~Node()
         {
             // We DO NOT delete obj here, because its ownership is transferred on get()
@@ -63,6 +64,38 @@ template <typename T> class FIFO
                 break;
         }
         return visitor;
+    }
+
+    // Calls filt's operator() on every T* in the FIFO from oldest
+    // to newest. If the operator() returns false, the object is removed from
+    // the FIFO.
+    // ATTENTION! Before returning false, filt must free the memory of the
+    // T* in the appropriate manner (It's the same pointer as was added with
+    // put()).
+    // Returns filt.
+    // NOTE: filt() will not be called with NULL as an argument. If the
+    // FIFO is empty, it will not be called at all.
+    template <typename V> V& filter(V& filt)
+    {
+        Node start(0, exit);
+        for (Node* n = &start; n->next != 0;)
+        {
+            if (!filt(n->next->obj))
+            {
+                --count;
+                Node* nxt = n->next->next;
+                delete n->next;
+                n->next = nxt;
+                if (nxt == 0)
+                    entry = n;
+            }
+            else
+                n = n->next;
+        }
+        exit = start.next;
+        if (exit == 0)
+            entry = 0;
+        return filt;
     }
 
     // Puts obj into the buffer.

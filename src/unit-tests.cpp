@@ -287,6 +287,20 @@ void marlinbuf_tests()
     assert(strcmp(buf.next(), "N2G452*8\n") == 0);
 };
 
+struct OddEven
+{
+    int odd;
+    bool operator()(int* ip)
+    {
+        if ((*ip & 1) == odd)
+        {
+            delete ip;
+            return false;
+        }
+        return true;
+    }
+};
+
 void fifo_tests()
 {
     FIFO<int> fifi;
@@ -312,6 +326,27 @@ void fifo_tests()
     delete ip;
     assert(fifi.empty());
     assert(fifi.get() == 0);
+
+    OddEven odd{1};
+    fifi.filter(odd);
+    fifi.put(new int(7));
+    fifi.filter(odd);
+    assert(fifi.empty());
+    fifi.put(new int(6));
+    fifi.put(new int(7));
+    assert(fifi.size() == 2);
+    fifi.filter(odd);
+    assert(fifi.size() == 1);
+    fifi.put(new int(8));
+    assert(fifi.size() == 2);
+    assert(fifi.peek() == 6);
+    delete fifi.get();
+    fifi.put(new int(10));
+    assert(fifi.size() == 2);
+    assert(fifi.peek() == 8);
+    OddEven even{0};
+    fifi.filter(even);
+    assert(fifi.empty());
 };
 
 void file_tests()
