@@ -102,6 +102,92 @@ struct GCodeExtension
     }
 } gcode_extension;
 
+const char* boolStr(bool b)
+{
+    if (b)
+        return "true";
+    else
+        return "false";
+}
+
+class PrinterState
+{
+    float tool[2][2];
+    float bed[2];
+
+  public:
+    enum Enum
+    {
+        Disconnected = 0, // Marlinfeed not currently sync'ed with printer
+        Printing = 1,     // Commands are flowing from an infile to printer
+        Idle = 2,         // Marlinfeed sync'ed with printer but no active infile
+        Stalled = 3       // Commands are waiting because printer buffer has been full for a while
+    } status;
+
+    void operator=(Enum s) { status = s; }
+
+    const char* toJSON()
+    {
+        char* j;
+        const char* text = "Operational";
+        if (status == Printing)
+            text = "Printing";
+        if (status == Stalled)
+            text = "Stalled";
+        const char* operational = boolStr(true);
+        const char* paused = boolStr(false);
+        const char* printing = boolStr(status == Printing || status == Stalled);
+        const char* cancelling = boolStr(false);
+        const char* pausing = boolStr(false);
+        const char* sdReady = boolStr(false);
+        const char* error = boolStr(false);
+        const char* ready = boolStr(true);
+        const char* closedOrError = boolStr(false);
+        int len = asprintf(&j,
+                           "{\r\n"
+                           "  \"sd\": {\r\n"
+                           "    \"ready\": %s\r\n"
+                           "  },\r\n"
+                           "  \"state\": {\r\n"
+                           "    \"text\": \"%s\",\r\n"
+                           "    \"flags\": {\r\n"
+                           "      \"operational\": %s,\r\n"
+                           "      \"paused\": %s,\r\n"
+                           "      \"printing\": %s,\r\n"
+                           "      \"cancelling\": %s,\r\n"
+                           "      \"pausing\": %s,\r\n"
+                           "      \"sdReady\": %s,\r\n"
+                           "      \"error\": %s,\r\n"
+                           "      \"ready\": %s,\r\n"
+                           "      \"closedOrError\": %s\r\n"
+                           "    }\r\n"
+                           "  },\r\n"
+                           "  \"temperature\": {\r\n"
+                           "    \"tool0\": {\r\n"
+                           "      \"actual\": %f,\r\n"
+                           "      \"target\": %f,\r\n"
+                           "      \"offset\": 0\r\n"
+                           "    },\r\n"
+                           "    \"tool1\": {\r\n"
+                           "      \"actual\": %f,\r\n"
+                           "      \"target\": %f,\r\n"
+                           "      \"offset\": 0\r\n"
+                           "    },\r\n"
+                           "    \"bed\": {\r\n"
+                           "      \"actual\": %f,\r\n"
+                           "      \"target\": %f,\r\n"
+                           "      \"offset\": 0\r\n"
+                           "    }\r\n"
+                           "  }\r\n"
+                           "}\r\n",
+                           sdReady, text, operational, paused, printing, cancelling, pausing, sdReady, error, ready,
+                           closedOrError, tool[0][0], tool[0][1], tool[1][0], tool[1][1], bed[0], bed[1]);
+        if (len <= 0)
+            return "{}";
+        return j;
+    }
+} printerState;
+
 int main(int argc, char* argv[])
 {
     signal(SIGCHLD, SIG_IGN); // automatic zombie removal
@@ -241,6 +327,8 @@ int main(int argc, char* argv[])
     if (options[IOERROR] && options[IOERROR].arg[0] == 'q')
         ioerror_next = false; // override default if --ioerror=quit on command line
 
+    printerState = PrinterState::Disconnected;
+
     for (;;)
     {
         // If we're done with all infiles and there is no chance of any additional
@@ -299,10 +387,15 @@ int main(int argc, char* argv[])
             if (!ioerror_next)
                 exit(1);
             if (in_out_printer == 2) // hard error on printer (e.g. USB unplugged)
-                sleep(10);           // wait for it to go away (e.g. USB cable to be replugged)
+                sleep(5);            // wait for it to go away (e.g. USB cable to be replugged)
             if (in_out_printer == 2 || in_out_printer == 3)
+            {
                 serial.close();
+                printerState = PrinterState::Disconnected;
+            }
         }
+        else
+            printerState = PrinterState::Idle;
 
         free(infile);
     }
@@ -428,6 +521,8 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
             goto do_hard_reconnect;
     }
 
+    printerState = PrinterState::Idle;
+
     gcode::Reader gcode_serial(serial);
     gcode_serial.whitespaceCompression(1);
 
@@ -473,6 +568,9 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
         ++nfds;
     }
 
+    printerState = PrinterState::Printing;
+    int stall_counter = 0;
+
     for (;;)
     {
         // Save CPU cycles by doing a poll() on the involved file descriptors
@@ -495,6 +593,7 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
                 action_on_printer = true;
                 if (input->startsWith("ok\b"))
                 {
+                    stall_counter = 0;
                     if (ignore_ok)
                         ignore_ok = false;
                     else if (!marlinbuf.ack())
@@ -536,7 +635,10 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
                         next_gcode = 0;
                     }
                     else
+                    {
+                        ++stall_counter;
                         break;
+                    }
                 }
                 else
                     break;
@@ -550,7 +652,9 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
                 stdoutbuf.put(gcode_to_send); // echo to stdout
                 serial.writeAll(gcode_to_send->data(), gcode_to_send->length());
             }
-        }
+
+            printerState = stall_counter > 2 ? PrinterState::Stalled : PrinterState::Printing;
+        } // while(action_on_printer)
 
         // Accept as socket connection if any is pending, then fork
         // and handle it in a child process.
@@ -615,14 +719,50 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
     }
 }
 
-const char* HTTP_ERROR = "HTTP/1.1 %d %s\r\n"
-                         "Cache-Control: no-store\r\n"
-                         "Content-Length: %d\r\n"
-                         "Content-Type: %s\r\n"
-                         "\r\n%s";
+const char* HTTP_HEADERS = "HTTP/1.1 %d %s\r\n"
+                           "Cache-Control: no-store\r\n"
+                           "Content-Length: %d\r\n"
+                           "Content-Type: %s\r\n"
+                           "\r\n%s";
 
-void wait_empty_line(gcode::Reader& client_reader)
+enum HTTPCode
 {
+    OK = 0,
+    NotFound = 1
+};
+int HTTPCodeNum[] = {200, 404};
+const char* HTTPCodeDesc[] = {"OK", "Not Found"};
+
+const char* VERSION_JSON = "{\r\n"
+                           "  \"api\": \"0.1\",\r\n"
+                           "  \"server\": \"1.0.0\",\r\n"
+                           "  \"text\": \"Marlinfeed 1.0.0\"\r\n"
+                           "}\r\n";
+
+const char* SETTINGS_JSON = "{\r\n"
+                            "  \"feature\":\r\n"
+                            "  {\r\n"
+                            "    \"sdSupport\": false\r\n"
+                            "  },\r\n"
+                            "  \"webcam\":\r\n"
+                            "  {\r\n"
+                            "    \"webcamEnabled\": false,\r\n"
+                            "    \"streamUrl\": \"\"\r\n"
+                            "  }\r\n"
+                            "}\r\n";
+
+const char* HTTP_LOGIN = "{\r\n"
+                         "  \"_is_external_client\": false,\r\n"
+                         "  \"active\": true,\r\n"
+                         "  \"admin\": true,\r\n"
+                         "  \"apikey\": null,\r\n"
+                         "  \"groups\": [\"admins\",\"users\"],\r\n"
+                         "  \"name\": \"_api\""
+                         "}\r\n";
+
+int wait_empty_line(gcode::Reader& client_reader)
+{
+    int contentlength = 0;
     client_reader.whitespaceCompression(2);
     for (;;)
     {
@@ -631,19 +771,54 @@ void wait_empty_line(gcode::Reader& client_reader)
             break;
         if (line->length() == 1)
             break;
+        int idx;
+        if (0 < (idx = line->startsWith("Content-Length:\b")))
+        {
+            line->slice(idx);
+            contentlength = line->number();
+        }
         delete line;
     }
+    return contentlength;
 }
 
-void http_error(File& client, gcode::Reader& client_reader, int code, const char* desc)
+void http_error(File& client, gcode::Reader& client_reader, HTTPCode code)
 {
-    wait_empty_line(client_reader);
+    int len = wait_empty_line(client_reader);
+    if (len < 65536)
+    {
+        char buffy[len];
+        client.read(buffy, len, 1000);
+    }
+
     const char* content = "<!DOCTYPE html><html><head><title>Error</title></head><body><h1>Error</h1></body></html>";
     char* reply;
-    int len = asprintf(&reply, HTTP_ERROR, code, desc, strlen(content), "text/html", content);
+    len = asprintf(&reply, HTTP_HEADERS, HTTPCodeNum[code], HTTPCodeDesc[code], strlen(content), "text/html", content);
     if (len > 0)
         client.writeAll(reply, len);
-    client.close();
+    _exit(1);
+}
+
+const char* login_json()
+{
+    char* login;
+    if (0 < asprintf(&login, "%s", HTTP_LOGIN))
+        return login;
+    return "";
+}
+
+void http_json(const char* json, File& client, gcode::Reader& client_reader, HTTPCode code)
+{
+    int len = wait_empty_line(client_reader);
+    if (len < 65536)
+    {
+        char buffy[len];
+        client.read(buffy, len, 1000);
+    }
+    char* reply;
+    len = asprintf(&reply, HTTP_HEADERS, HTTPCodeNum[code], HTTPCodeDesc[code], strlen(json), "application/json", json);
+    if (len > 0)
+        client.writeAll(reply, len);
     _exit(1);
 }
 
@@ -660,12 +835,32 @@ void handle_socket_connection(int fd)
     {
         request->slice(idx);
         if (request->startsWith("/plugin/appkeys/probe\b"))
-            http_error(client, client_reader, 404, "Not Found");
+            http_error(client, client_reader, NotFound);
+
+        if (request->startsWith("/api/"))
+        {
+            request->slice(5);
+            if (request->startsWith("version\b"))
+                http_json(VERSION_JSON, client, client_reader, OK);
+            if (request->startsWith("settings\b"))
+                http_json(SETTINGS_JSON, client, client_reader, OK);
+            if (request->startsWith("printer\b"))
+                http_json(printerState.toJSON(), client, client_reader, OK);
+            if (request->startsWith("job\b"))
+                http_json("{\"job\":{\"file\":{\"name\":\"\"}},\"progress\":{\"printTime\":null,\"completion\":null}}",
+                          client, client_reader, OK);
+        }
     }
     else if (0 < (idx = (request->startsWith("post\b") + request->startsWith("POST\b"))))
     {
         request->slice(idx);
+        if (request->startsWith("/api/"))
+        {
+            request->slice(5);
+            if (request->startsWith("login\b"))
+                http_json(login_json(), client, client_reader, OK);
+        }
     }
 
-    http_error(client, client_reader, 404, "Not Found");
+    http_error(client, client_reader, NotFound);
 }
