@@ -51,7 +51,7 @@
             "type": "cppdbg",
             "request": "launch",
             "program": "marlinfeed",
-            "args": [":8080/upload","test/mocklins_dirty_sock"],
+            "args": ["-v","test/corgi.gcode","test/mocklins_dirty_sock"],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "environment": [],

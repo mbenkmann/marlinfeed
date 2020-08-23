@@ -20,6 +20,7 @@
  */
 
 #include <errno.h>
+#include <math.h>
 #include <memory>
 #include <signal.h>
 #include <stdio.h>
@@ -32,6 +33,7 @@
 #include "file.h"
 #include "gcode.h"
 #include "marlinbuf.h"
+#include "millis.h"
 
 using gcode::Line;
 using std::unique_ptr;
@@ -68,9 +70,20 @@ long resend_when = LONG_MIN;
 long resend_what = LONG_MIN;
 bool resend_toggle = true;
 
+struct PrinterState
+{
+    double X = 0, Y = 0, Z = 0;
+    double F = 0;
+    double bed = 20;
+    double nozzle = 20;
+    bool relative = false;
+} p;
+
+void report_position() { fprintf(stdout, "X %5.1f  Y %5.1f  Z %5.1f\n", p.X, p.Y, p.Z); }
+
 int main(int argc, char* argv[])
 {
-    signal(SIGPIPE, SIG_IGN);
+    signal(SIGPIPE, SIG_IGN); // handle as EPIPE on write()
 
     argc -= (argc > 0);
     argv += (argc > 0); // skip program name argv[0] if present
@@ -160,6 +173,8 @@ struct Command
 long gcode_N = 0;
 long gcode_LastN = 0;
 
+double HOMING_FEEDRATE = 1500;
+
 const int BUFSIZE = 4; // maximum number of entries in cmd_fifo
 FIFO<Command> cmd_fifo;
 
@@ -175,15 +190,28 @@ void ok_to_send(File& peer)
     fprintf(stdout, "%s", buf);
 }
 
+struct Block
+{
+    int64_t endTimeMillis;
+    double X;
+    double Y;
+    double Z;
+};
+
+// Max numer of entries in block_fifo;
+const int BLOCK_BUFFER_SIZE = 16;
+FIFO<Block> block_fifo;
+
 /**
  * Send a "Resend: nnn" message to the host to
  * indicate that a command needs to be re-sent.
  */
-void flush_and_request_resend(File& peer)
+void flush_and_request_resend(gcode::Reader& reader, File& peer)
 {
     // Marlin uses ok_to_send(), here instead of always sending an ok.
     // But that seems like a bug.
     // https://github.com/MarlinFirmware/Marlin/issues/18955
+    reader.discard();
     char buf[1024];
     peer.tail(buf, sizeof(buf), 0, 0);
     int len = snprintf(buf, sizeof(buf), "%s%ld\nok\n", MSG_RESEND, gcode_LastN + 1);
@@ -193,7 +221,7 @@ void flush_and_request_resend(File& peer)
     fprintf(stdout, "%s", buf);
 }
 
-void gcode_line_error(File& peer, const char* err, bool doFlush = true)
+void gcode_line_error(gcode::Reader& reader, File& peer, const char* err, bool doFlush = true)
 {
     char sendbuf[1024];
     int len = snprintf(sendbuf, sizeof(sendbuf), "%s%s%ld\n", MSG_ERRORMAGIC, err, gcode_LastN);
@@ -202,10 +230,10 @@ void gcode_line_error(File& peer, const char* err, bool doFlush = true)
     peer.writeAll(sendbuf, len);
     fprintf(stdout, "%s", sendbuf);
     if (doFlush)
-        flush_and_request_resend(peer);
+        flush_and_request_resend(reader, peer);
 }
 
-void resend_request(File& peer, long resend_when, long resend_what)
+void resend_request(gcode::Reader& reader, File& peer, long resend_when, long resend_what)
 {
     char sendbuf[1024];
     int len =
@@ -215,7 +243,7 @@ void resend_request(File& peer, long resend_when, long resend_what)
     peer.writeAll(sendbuf, len);
     fprintf(stdout, "%s", sendbuf);
     gcode_LastN = resend_what - 1;
-    flush_and_request_resend(peer);
+    flush_and_request_resend(reader, peer);
 }
 
 void unknown_command_error(File& peer, const char* gcode)
@@ -228,9 +256,56 @@ void unknown_command_error(File& peer, const char* gcode)
     fprintf(stdout, "%s", sendbuf);
 }
 
+void plan_move(double x0, double y0, double z0, double feed)
+{
+    if (feed < 60) // don't allow less than 1mm/s
+        feed = 60;
+    double x1 = x0 - p.X;
+    double y1 = y0 - p.Y;
+    double z1 = z0 - p.Z;
+    double dist = sqrt(x1 * x1 + y1 * y1 + z1 * z1);
+    double minutes = dist / feed;
+    int wait_millis = int(minutes * 60 * 1000);
+    block_fifo.put(new Block{wait_millis + millis(), x0, y0, z0});
+}
+
+void sync_planner()
+{
+    for (;;)
+    {
+        Block* b = block_fifo.get();
+        if (b == 0)
+            break;
+        int64_t t = b->endTimeMillis - millis();
+        p.X = b->X;
+        p.Y = b->Y;
+        p.Z = b->Z;
+        delete b;
+        if (t > 0)
+            usleep(t * 1000);
+        report_position();
+    }
+}
+
+void check_planner()
+{
+    if (block_fifo.empty() || block_fifo.peek().endTimeMillis > millis())
+        return;
+    Block* b = block_fifo.get();
+    p.X = b->X;
+    p.Y = b->Y;
+    p.Z = b->Z;
+    delete b;
+    report_position();
+}
+
 void process_next_command(File& peer)
 {
-    if (cmd_fifo.empty())
+    static double X(0);
+    static double Y(0);
+    static double Z(0);
+
+    if (cmd_fifo.empty() || block_fifo.size() == BLOCK_BUFFER_SIZE)
         return;
 
     const int G = 0;
@@ -264,14 +339,29 @@ void process_next_command(File& peer)
     {
         case G + 0: // Linear Move
         case G + 1: // Linear Move
+        {
+            X = cmd->gcode->getDouble("X", X, p.relative);
+            Y = cmd->gcode->getDouble("Y", Y, p.relative);
+            Z = cmd->gcode->getDouble("Z", Z, p.relative);
+            p.F = cmd->gcode->getDouble("F", p.F);
+            plan_move(X, Y, Z, p.F);
             break;
+        }
         case G + 28: // Auto Home
+            plan_move(0, 0, 0, HOMING_FEEDRATE);
+            sync_planner();
             break;
         case G + 90: // Absolute Positioning
+            p.relative = false;
             break;
         case G + 91: // Relative Positioning
+            p.relative = true;
             break;
         case G + 92: // Set Position
+            X = cmd->gcode->getDouble("X", X, false);
+            Y = cmd->gcode->getDouble("Y", Y, false);
+            Z = cmd->gcode->getDouble("Z", Z, false);
+            plan_move(X, Y, Z, 999999999);
             break;
         case M + 82: // E Absolute
             break;
@@ -284,11 +374,15 @@ void process_next_command(File& peer)
             break;
         case M + 106: // Set Fan Speed
             break;
+        case M + 107: // Fan Off
+            break;
         case M + 109: // Wait for Hotend Temperature
             break;
         case M + 110: // Set Line Number
             break;    // already handled
         case M + 115: // Firmware Info
+            break;
+        case M + 117: // Set LCD Message
             break;
         case M + 140: // Set Bed Temperature
             break;
@@ -324,6 +418,7 @@ void handle_connection(int fd)
     peer.autoClose();
     peer.setNonBlock(true);
     gcode::Reader reader(peer);
+    reader.whitespaceCompression(0); // don't mess up checksums
 
     sleep(1); // Wait a little because that's what a normal printer does
     peer.writeAll(WELCOME_TEXT, strlen(WELCOME_TEXT));
@@ -338,7 +433,7 @@ void handle_connection(int fd)
             unique_ptr<Line> line(reader.next());
 
             const char* command = line->data();
-            fprintf(stdout, "%s\n", command);
+            fprintf(stdout, "%s", command);
 
             const char* npos = (*command == 'N') ? command : NULL; // Require the N parameter to start the line
 
@@ -361,7 +456,7 @@ void handle_connection(int fd)
 
                 if (gcode_N != gcode_LastN + 1 && !M110)
                 {
-                    gcode_line_error(peer, MSG_ERR_LINE_NO);
+                    gcode_line_error(reader, peer, MSG_ERR_LINE_NO);
                     continue;
                 }
 
@@ -370,7 +465,7 @@ void handle_connection(int fd)
                     resend_toggle = !resend_toggle;
                     if (!resend_toggle)
                     {
-                        resend_request(peer, resend_when, resend_what);
+                        resend_request(reader, peer, resend_when, resend_what);
                         continue;
                     }
                 }
@@ -384,13 +479,13 @@ void handle_connection(int fd)
                         checksum ^= command[--count];
                     if (strtol(apos + 1, NULL, 10) != checksum)
                     {
-                        gcode_line_error(peer, MSG_ERR_CHECKSUM_MISMATCH);
+                        gcode_line_error(reader, peer, MSG_ERR_CHECKSUM_MISMATCH);
                         continue;
                     }
                 }
                 else
                 {
-                    gcode_line_error(peer, MSG_ERR_NO_CHECKSUM);
+                    gcode_line_error(reader, peer, MSG_ERR_NO_CHECKSUM);
                     continue;
                 }
 
@@ -404,12 +499,14 @@ void handle_connection(int fd)
 
         process_next_command(peer);
 
-        if (cmd_fifo.empty())
+        if (cmd_fifo.empty() && block_fifo.empty())
         {
             if (peer.EndOfFile() || peer.hasError())
                 break;
-            usleep(1000); // sleep 1ms to save some clock cycles
         }
+
+        usleep(1000); // sleep 1ms to save some clock cycles
+        check_planner();
     }
 
     if (peer.hasError()) // report if we ended due to an error and not EOF

@@ -109,6 +109,46 @@ class Line
         return l;
     }
 
+    // Searches the line for the 1st occurence of id preceded and followed
+    // by a non-alpha character. Then skips over whitespace, ':' and '=' and
+    // converts the following characters to double via strtod().
+    // If id is not found, base is returned. If id is found and add==true,
+    // base is added to the converted number; otherwise the converted number
+    // is returned as strtod() produces it.
+    double getDouble(const char* id, double base = 0, bool add = false)
+    {
+        double found = base;
+        if (add)
+            found = 0;
+
+        int idlen = strlen(id);
+
+        const char* line = data();
+        for (;;)
+        {
+            const char* s = strstr(line, id);
+            if (s == 0)
+                break;
+
+            if ((s == data() || !isalpha(s[-1])) && !isalpha(s[idlen]))
+            {
+                s += idlen;
+                while (s[0] != 0 && (isspace(s[0]) || s[0] == ':' || s[0] == '='))
+                    ++s;
+                found = strtod(s, 0);
+                break;
+            }
+            else
+            {
+                line++;
+            }
+        }
+
+        if (add)
+            found += base;
+        return found;
+    }
+
     // Returns 0 if the line does not start with prefix; otherwise
     // returns the length of the matched prefix (which is strlen(prefix), unless
     // you use any of the below special characters).
@@ -224,6 +264,15 @@ class Reader
 
     char buf[BUFSIZE + 1]; // +1 for 0 terminator
 
+    // Size of buffer for Slicer comments that we parse.
+    static const int COMMENT_BUFSIZE = 64;
+
+    // Slicer comment to be parsed.
+    char combuf[64];
+
+    // index in combuf[]
+    int comidx;
+
     // index of the next empty spot in buf, i.e. where reading will continue.
     // always <= BUFSIZE, meaning buf[bufidx] is not out of bounds.
     int bufidx;
@@ -246,6 +295,27 @@ class Reader
     // Set to true while bufidx is within a comment block
     bool in_comment;
 
+    // Total number of bytes received from the underlying file.
+    int64_t bytesRead;
+
+    // Print time extracted from slicer comments; 0 if not parsed (yet)
+    int printTime;
+
+    // Try to extract information from a slicer comment.
+    void parseComment()
+    {
+        combuf[comidx] = 0;
+        if (strncmp("TIME:", combuf, 5) == 0)
+        {
+            long l = strtol(combuf + 5, 0, 10);
+            if (l > 0 && l < 8640000)
+            {
+                printTime = l;
+            }
+        }
+        comidx = 0;
+    }
+
     // DO NOT CALL if ready > 0!
     void tryRead()
     {
@@ -267,6 +337,7 @@ class Reader
                 }
                 full_scan = false;
 
+                bytesRead += retval;
                 bufidx += retval;
                 for (int k = i; k < bufidx;)
                 {
@@ -274,6 +345,9 @@ class Reader
 
                     if (ch == '\n')
                     {
+                        if (in_comment)
+                            parseComment();
+
                         in_comment = false;
                         if (wsComp == 1 && i > 0 && buf[i - 1] == ' ')
                             --i;
@@ -291,6 +365,10 @@ class Reader
 
                     if (in_comment || ch == comment)
                     {
+                        if (in_comment && comidx < COMMENT_BUFSIZE - 1) // -1 for 0 terminator
+                            combuf[comidx++] = ch;
+                        else
+                            comidx = 0;
                         in_comment = true;
                         continue;
                     }
@@ -329,7 +407,21 @@ class Reader
     // Wraps a Reader around in. If the file is in blocking mode, hasNext() will block
     // until data is available.
     // in has to be open already.
-    Reader(File& _in) : in(_in), bufidx(0), ready(0), wsComp(3), full_scan(false), comment(';'), in_comment(false){};
+    Reader(File& _in)
+        : in(_in), comidx(0), bufidx(0), ready(0), wsComp(3), full_scan(false), comment(';'), in_comment(false),
+          bytesRead(0), printTime(0){};
+
+    // Discard all data currently buffered by the reader. The next attempt to
+    // read will start a new line at whatever file position the underlying
+    // file is at.
+    void discard()
+    {
+        comidx = 0;
+        bufidx = 0;
+        ready = 0;
+        full_scan = false;
+        in_comment = false;
+    }
 
     // Sets the whitespace compression level. See also commentChar().
     // 0: keep all whitespace
@@ -344,6 +436,15 @@ class Reader
     // preserve comments.
     // Default is ';'.
     void commentChar(char ch) { comment = ch; }
+
+    // Returns the number of bytes read from the underlying file (regardless of
+    // whether or not they have been stripped as whitespace and regardless of
+    // whether they have been extracted via next()).
+    int64_t totalBytesRead() { return bytesRead; }
+
+    // Returns the estimated print time as parsed from slicer comments; or 0 if
+    // no such comment has been parsed yet.
+    int estimatedPrintTime() { return printTime; }
 
     // Returns true if a complete line of GCODE has been read and is ready for
     // extraction via next(). If a line is not already available when hasNext()
