@@ -35,6 +35,7 @@
 #include "file.h"
 #include "gcode.h"
 #include "marlinbuf.h"
+#include "millis.h"
 
 using gcode::Line;
 using std::unique_ptr;
@@ -44,6 +45,7 @@ enum optionIndex
     UNKNOWN,
     HELP,
     IOERROR,
+    VERBOSE
 };
 const option::Descriptor usage[] = {
     {UNKNOWN, 0, "", "", Arg::Unknown,
@@ -63,6 +65,7 @@ const option::Descriptor usage[] = {
      "\n\n"
      "Options:"},
     {HELP, 0, "", "help", Arg::None, "  \t--help  \tPrint usage and exit."},
+    {VERBOSE, 0, "v", "verbose", Arg::None, "  -v, \t--verbose  \tIncrease verbosity. Can be used multiple times."},
     {IOERROR, 0, "e", "ioerror", Arg::IOError,
      "  -e<arg>, \t--ioerror[=<arg>]"
      "  \tHow to handle an error on <infile> or <printdev>.\v'next' reinitializes communication with"
@@ -80,7 +83,18 @@ const option::Descriptor usage[] = {
 
 const char* NEW_SOCKET_CONNECTION = "New socket connection => Forking child\n";
 
+// Maximum number of milliseconds we don't get a non-error reply from the printer.
+// This aborts the current job if the printer keeps replying to everything we send
+// with an error.
+const int MAX_TIME_WITH_ERROR = 5000;
+
+// Maximum number of milliseconds with no message from the printer while
+// at least 1 command is not ack'd. Needs to be longer than the longest
+// blocking command that is silent (e.g. G28).
+const int MAX_TIME_SILENCE = 120000;
+
 bool ioerror_next;
+int verbosity = 0;
 const char* upload_dir = "/dev/null/";
 
 bool handle(File& out, File& serial, const char* infile, File* sock, const char** e, int* iop);
@@ -114,8 +128,23 @@ class PrinterState
 {
     float tool[2][2];
     float bed[2];
+    int64_t startTime;
+    int64_t endTime;
+    const char* printName;
+    int64_t printSize;
+    int64_t printedBytes;
 
   public:
+    void clearJob()
+    {
+        startTime = 0;
+        endTime = 0;
+        free((void*)printName);
+        printName = strdup("Unnamed");
+        printSize = 0;
+        printedBytes = 0;
+    }
+
     enum Enum
     {
         Disconnected = 0, // Marlinfeed not currently sync'ed with printer
@@ -124,7 +153,63 @@ class PrinterState
         Stalled = 3       // Commands are waiting because printer buffer has been full for a while
     } status;
 
-    void operator=(Enum s) { status = s; }
+    void operator=(Enum s)
+    {
+        if (s != Printing && s != Stalled)
+            clearJob();
+        if (s == Printing && status != Printing && status != Stalled)
+            startTime = millis();
+        status = s;
+    }
+
+    void setPrintName(const char* name)
+    {
+        free((void*)printName);
+        printName = strdup(name);
+    };
+    void setPrintSize(int64_t bytes) { printSize = bytes; }
+    void setPrintedBytes(int64_t bytes) { printedBytes = bytes; }
+    void setEstimatedPrintTime(int seconds)
+    {
+        if (seconds > 0)
+            endTime = startTime + seconds * 1000;
+    }
+
+    //"{\"job\":{\"file\":{\"name\":\"\"}},\"progress\":{\"printTime\":null,\"completion\":null}}"
+    const char* jobJSON()
+    {
+        char* j;
+        const char* text = "Operational";
+        if (status == Printing || status == Stalled)
+            text = "Printing";
+        double deltat = 0;
+        if (startTime > 0)
+            deltat = (millis() - startTime);
+        double completion = 0;
+        if (startTime > 0 && endTime > startTime)
+            completion = deltat / (endTime - startTime);
+        else if (printSize > 0)
+            completion = (double)printedBytes / (double)printSize;
+        deltat /= 1000; // convert to seconds
+
+        int len = asprintf(&j,
+                           "{\r\n"
+                           "  \"state\": \"%s\",\r\n"
+                           "  \"job\": {\r\n"
+                           "    \"file\": {\r\n"
+                           "      \"name\": \"%s\"\r\n"
+                           "    }\r\n"
+                           "  },\r\n"
+                           "  \"progress\": {\r\n"
+                           "      \"printTime\": %f,\r\n"
+                           "      \"completion\": %f\r\n"
+                           "  }\r\n"
+                           "}\r\n",
+                           text, printName, deltat, completion);
+        if (len <= 0)
+            return "{}";
+        return j;
+    }
 
     const char* toJSON()
     {
@@ -186,11 +271,26 @@ class PrinterState
             return "{}";
         return j;
     }
+
+    PrinterState()
+    {
+        printName = 0;
+        clearJob();
+        tool[0][0] = 0;
+        tool[0][1] = 0;
+        tool[1][0] = 0;
+        tool[1][1] = 0;
+        bed[0] = 0;
+        bed[1] = 0;
+    }
 } printerState;
+
+File out("stdout", 1);
 
 int main(int argc, char* argv[])
 {
     signal(SIGCHLD, SIG_IGN); // automatic zombie removal
+    signal(SIGPIPE, SIG_IGN); // handle as EPIPE on write()
 
     argc -= (argc > 0);
     argv += (argc > 0); // skip program name argv[0] if present
@@ -217,7 +317,8 @@ int main(int argc, char* argv[])
         exit(1);
     }
 
-    File out("stdout", 1);
+    verbosity = options[VERBOSE].count();
+
     out.setNonBlock(true);
     // We don't exit for errors on stdout. It's just used for echoing.
 
@@ -346,7 +447,8 @@ int main(int argc, char* argv[])
                 int connfd = sock->accept();
                 if (connfd >= 0)
                 {
-                    out.writeAll(NEW_SOCKET_CONNECTION, strlen(NEW_SOCKET_CONNECTION));
+                    if (verbosity > 0)
+                        out.writeAll(NEW_SOCKET_CONNECTION, strlen(NEW_SOCKET_CONNECTION));
                     pid_t childpid = fork();
                     if (childpid < 0)
                         perror("fork");
@@ -477,14 +579,16 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
         // buffy[n-1] is \n terminating the last line
         // buffy[n] is out of bounds
 
-        out.writeAll(buffy, n);
+        if (verbosity > 0)
+            out.writeAll(buffy, n);
 
         // When we get here for attempt 0, we haven't yet sent WRAP_AROUND_STRING, so any ok
         // we may see is unrelated. Therefore we don't break for attempt == 0.
         if (attempt > 0 && (buffy[idx] == 'o' && buffy[idx + 1] == 'k' && buffy[idx + 2] <= ' '))
             break;
 
-        out.writeAll(MarlinBuf::WRAP_AROUND_STRING, MarlinBuf::WRAP_AROUND_STRING_LENGTH);
+        if (verbosity > 0)
+            out.writeAll(MarlinBuf::WRAP_AROUND_STRING, MarlinBuf::WRAP_AROUND_STRING_LENGTH);
 
         if (!serial.writeAll(MarlinBuf::WRAP_AROUND_STRING, MarlinBuf::WRAP_AROUND_STRING_LENGTH))
         {
@@ -533,11 +637,15 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
     }
     else
     {
+        printerState.setPrintName(infile);
         in.reset(new File(infile));
         in->open(O_RDONLY);
     }
 
     in->setNonBlock(true);
+    struct stat statbuf;
+    if (in->stat(&statbuf))
+        printerState.setPrintSize(statbuf.st_size);
     if (in->hasError())
         return handle_error(e, in->error(), iop, 0);
 
@@ -570,6 +678,10 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
 
     printerState = PrinterState::Printing;
     int stall_counter = 0;
+    bool have_time = false; // if we have extracted an estimated print time from slicer comments
+    int resend_count = 0;
+    int64_t last_error = 0;
+    int64_t last_lifesign = 0; // 0 => we're not waiting for a lifesign
 
     for (;;)
     {
@@ -590,23 +702,41 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
             bool ignore_ok = false;
             while (0 != (input = gcode_serial.next()))
             {
+                last_lifesign = millis();
                 action_on_printer = true;
                 if (input->startsWith("ok\b"))
                 {
+                    if (verbosity > 1)
+                        stdoutbuf.put(input); // echo to stdout
                     stall_counter = 0;
                     if (ignore_ok)
                         ignore_ok = false;
-                    else if (!marlinbuf.ack())
-                        stdoutbuf.put( // Don't exit for this error. The user knows best.
-                            new gcode::Line("WARNING! Spurious 'ok'! Is a user manually controlling the printer?"));
+                    else
+                    {
+                        resend_count = 0;
+                        last_error = 0;
+                        if (!marlinbuf.ack())
+                            stdoutbuf.put( // Don't exit for this error. The user knows best.
+                                new gcode::Line("WARNING! Spurious 'ok'! Is a user manually controlling the printer?"));
+                    }
                 }
                 else if (input->startsWith("Error:"))
                 {
-                    // Add code to handle specific errors.
+                    if (last_error == 0)
+                        last_error = millis();
+                    stdoutbuf.put(input); // echo to stdout
+                    // Give printer a little bit of time to send more errors if any, so that we
+                    // don't leave this loop too early, start sending and trigger more errors.
+                    usleep(100000);
                 }
                 else if (0 != (idx = input->startsWith("Resend:\b")))
                 {
+                    if (last_error == 0)
+                        last_error = millis();
+                    ++resend_count;
                     input->slice(idx);
+                    stdoutbuf.put(new Line("Resend: ")); // print the sliced away part
+                    stdoutbuf.put(input);                // echo to stdout
                     long line = input->number();
                     if (line < 0 || line > 2147483647)
                         line = -1;
@@ -615,15 +745,36 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
                         return handle_error(e, "Illegal 'Resend' received from printer", iop, 3);
 
                     ignore_ok = true; // ignore the ok that accompanies the Resend
+
+                    // Give printer a little bit of time to send more errors if any, so that we
+                    // don't leave this loop too early, start sending and trigger more errors.
+                    usleep(100000);
+                }
+                else
+                {
+                    last_error = 0;
+                    stdoutbuf.put(input); // echo to stdout
                 }
 
-                stdoutbuf.put(input); // echo to stdout
+                if (last_error > 0 && millis() - last_error > MAX_TIME_WITH_ERROR)
+                    return handle_error(e, "Persistent error state on printer => abort current job", iop, 3);
             }
 
             for (;;)
             {
                 if (next_gcode == 0)
                     next_gcode = gcode_in.next(); // may still be null if no data available
+
+                if (!have_time)
+                {
+                    if (gcode_in.estimatedPrintTime() > 0)
+                    {
+                        have_time = true;
+                        printerState.setEstimatedPrintTime(gcode_in.estimatedPrintTime());
+                    }
+                    else
+                        printerState.setPrintedBytes(gcode_in.totalBytesRead());
+                }
 
                 if (next_gcode != 0)
                 {
@@ -649,7 +800,8 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
             {
                 action_on_printer = true;
                 gcode::Line* gcode_to_send = new gcode::Line(marlinbuf.next());
-                stdoutbuf.put(gcode_to_send); // echo to stdout
+                if (verbosity > 1)
+                    stdoutbuf.put(gcode_to_send); // echo to stdout
                 serial.writeAll(gcode_to_send->data(), gcode_to_send->length());
             }
 
@@ -663,7 +815,8 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
             int connfd = sock->accept();
             if (connfd >= 0)
             {
-                stdoutbuf.put(new gcode::Line(NEW_SOCKET_CONNECTION));
+                if (verbosity > 0)
+                    stdoutbuf.put(new gcode::Line(NEW_SOCKET_CONNECTION));
                 pid_t childpid = fork();
                 if (childpid < 0)
                 {
@@ -699,16 +852,30 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
 
         if (out.errNo() == EWOULDBLOCK)
             out.clearError(); // Try again later.
-        // we don't exit for errors on stdout because it's only for echoing.
+                              // we don't exit for errors on stdout because it's only for echoing.
+
+        if (resend_count > 3)
+            return handle_error(e, "Too many 'Resend's received from printer", iop, 3);
 
         if (in->hasError())
             return handle_error(e, in->error(), iop, 0);
 
-        if (in->EndOfFile() && next_gcode == 0 && !marlinbuf.needsAck())
+        if (marlinbuf.needsAck())
         {
-            *iop = 0;
-            *e = "EOF on GCode source";
-            return true;
+            if (last_lifesign == 0)
+                last_lifesign = millis();
+            if (millis() - last_lifesign > MAX_TIME_SILENCE)
+                return handle_error(e, "Printer timeout waiting for ack", iop, 3);
+        }
+        else
+        {
+            last_lifesign = 0;
+            if (in->EndOfFile() && next_gcode == 0)
+            {
+                *iop = 0;
+                *e = "EOF on GCode source";
+                return true;
+            }
         }
 
         if (serial.hasError())
@@ -795,7 +962,10 @@ void http_error(File& client, gcode::Reader& client_reader, HTTPCode code)
     char* reply;
     len = asprintf(&reply, HTTP_HEADERS, HTTPCodeNum[code], HTTPCodeDesc[code], strlen(content), "text/html", content);
     if (len > 0)
+    {
         client.writeAll(reply, len);
+        out.writeAll(reply, len);
+    }
     _exit(1);
 }
 
@@ -818,7 +988,11 @@ void http_json(const char* json, File& client, gcode::Reader& client_reader, HTT
     char* reply;
     len = asprintf(&reply, HTTP_HEADERS, HTTPCodeNum[code], HTTPCodeDesc[code], strlen(json), "application/json", json);
     if (len > 0)
+    {
         client.writeAll(reply, len);
+        if (verbosity > 0)
+            out.writeAll(reply, len);
+    }
     _exit(1);
 }
 
@@ -830,6 +1004,10 @@ void handle_socket_connection(int fd)
     Line* request = client_reader.next();
     if (request == 0)
         _exit(0);
+
+    if (verbosity > 0)
+        out.writeAll(request->data(), request->length());
+
     int idx;
     if (0 < (idx = (request->startsWith("get\b") + request->startsWith("GET\b"))))
     {
@@ -847,8 +1025,7 @@ void handle_socket_connection(int fd)
             if (request->startsWith("printer\b"))
                 http_json(printerState.toJSON(), client, client_reader, OK);
             if (request->startsWith("job\b"))
-                http_json("{\"job\":{\"file\":{\"name\":\"\"}},\"progress\":{\"printTime\":null,\"completion\":null}}",
-                          client, client_reader, OK);
+                http_json(printerState.jobJSON(), client, client_reader, OK);
         }
     }
     else if (0 < (idx = (request->startsWith("post\b") + request->startsWith("POST\b"))))
