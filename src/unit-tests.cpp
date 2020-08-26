@@ -411,7 +411,7 @@ void file_tests()
     assert(bufrest == (const void*)&bigblock[sizeof(bigblock)]);
     assert(!pw.hasError());
 
-    sleep(1);
+    sleep(4);
     assert(pw.setNonBlock(true));
     assert(!pw.writeAll(bigblock, sizeof(bigblock), &nrest, &bufrest));
     assert(nrest > 0 && nrest < sizeof(bigblock));
@@ -444,6 +444,7 @@ void file_tests()
     assert(!pw.hasError());
     assert(nrest == 0);
     assert(bufrest == (const void*)&bigblock[sizeof(bigblock)]);
+    sleep(4);
 
     childpid = fork();
     assert(childpid >= 0);
@@ -468,7 +469,7 @@ void file_tests()
 
     char buffy[4];
 
-    assert(pr.tail(buffy, sizeof(buffy), 200, 420) == sizeof(buffy));
+    assert(pr.tail(buffy, sizeof(buffy), 200, 420, 420) == sizeof(buffy));
     assert(strncmp(buffy, "lmno", sizeof(buffy)) == 0);
     assert(!pr.EndOfFile());
 
