@@ -75,7 +75,7 @@ class Line
         text = 0;
     };
 
-    // Returns the length of the line.
+    // Returns the length of the line (not counting the always present 0-terminator).
     int length() const { return len; }
 
     // Returns a pointer to the internal data storage for the line.
@@ -146,6 +146,51 @@ class Line
 
         if (add)
             found += base;
+        return found;
+    }
+
+    // Searches the line for the 1st occurence of id preceded and followed
+    // by a non-alpha character. Then skips over whitespace, ':' and '=' and
+    // extracts a string surrounded by single or double quotes.
+    // If id is not found or there is no pair of quotes where expected,
+    // default_ is returned.
+    // If non-null, the returned string is always a copy allocated with strdup(),
+    // so you need to free() it when done.
+    char* getString(const char* id, const char* default_ = 0)
+    {
+        char* found = 0;
+
+        int idlen = strlen(id);
+
+        const char* line = data();
+        for (;;)
+        {
+            const char* location = strstr(line, id);
+            if (location == 0)
+                break;
+
+            const char* s = location;
+
+            if ((s == data() || !isalpha(s[-1])) && !isalpha(s[idlen]))
+            {
+                s += idlen;
+                while (s[0] != 0 && (isspace(s[0]) || s[0] == ':' || s[0] == '='))
+                    ++s;
+                if (s[0] == '"' || s[0] == '\'')
+                {
+                    const char* endquote = strchr(s + 1, s[0]);
+                    if (endquote != 0)
+                    {
+                        found = strndup(s + 1, (endquote - s) - 1);
+                        break;
+                    }
+                }
+            }
+            line = location + 1;
+        }
+
+        if (found == 0 && default_ != 0)
+            found = strdup(default_);
         return found;
     }
 
@@ -414,13 +459,16 @@ class Reader
     // Discard all data currently buffered by the reader. The next attempt to
     // read will start a new line at whatever file position the underlying
     // file is at.
-    void discard()
+    // Returns the number of bytes discarded.
+    int discard()
     {
+        int i = bufidx;
         comidx = 0;
         bufidx = 0;
         ready = 0;
         full_scan = false;
         in_comment = false;
+        return i;
     }
 
     // Sets the whitespace compression level. See also commentChar().

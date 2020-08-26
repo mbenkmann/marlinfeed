@@ -61,8 +61,8 @@ int main()
 {
     out.writeAll(WELCOME_MSG, strlen(WELCOME_MSG));
 
-    dirscanner_tests();
     gcode_tests();
+    dirscanner_tests();
     marlinbuf_tests();
     file_tests();
     fifo_tests();
@@ -215,6 +215,15 @@ void gcode_tests()
     line = reader.next();
     assert(line == 0);
     assert(!reader.hasNext());
+
+    line = new gcode::Line("X:\"1\" Beta  Alpha: 'Foo'   Beta = \"Foobar\"  Gamma :\"Bla");
+    assert(0 == strcmp(line->getString("Alpha"), "Foo"));
+    assert(line->getString("Delta") == 0);
+    assert(line->getString("Gamma") == 0);
+    assert(0 == strcmp(line->getString("Alph", "fasel"), "fasel"));
+    assert(0 == strcmp(line->getString("lpha", "fasel"), "fasel"));
+    assert(0 == strcmp(line->getString("Beta"), "Foobar"));
+    assert(0 == strcmp(line->getString("X"), "1"));
 }
 
 void marlinbuf_tests()
