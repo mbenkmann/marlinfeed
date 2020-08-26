@@ -189,13 +189,14 @@ class File
     // constructor or opened via open()). Unlike most other functions this function is
     // performed even if hasError(). You don't need to call clearError() first.
     // Returns: true on success, false in case of error
+    // The mode argument is only used if flags includes something like O_CREAT.
     //
     // NOTE: If this function is used, the File will be automatically
     // closed on destruction.
-    bool open(int flags = O_RDWR | O_NOCTTY | O_NONBLOCK)
+    bool open(int flags = O_RDWR | O_NOCTTY | O_NONBLOCK, mode_t mode = 0666)
     {
         close();
-        fd = ::open(fpath, flags);
+        fd = ::open(fpath, flags, mode);
         close_on_destruction = true;
         return checkError(fd);
     }
@@ -487,16 +488,23 @@ class File
     //            more_wait <= 0 causes the function to end the first time data becomes
     //            unavailable (except EINTR, which is handled transparently)
     //            Note that more_wait only comes into play after the 1st byte has
-    //            been read, i.e. a blocking file will block until at least 1 byte
-    //            is read OR max_time expires.
+    //            been read. The maximum time to wait for the 1st byte is governed
+    //            by initial_wait and max_time (see below).
+    // initial_wait: Maximum number of milliseconds to wait for the 1st byte if it
+    //            is not already available. If < 0, the wait depends on whether the
+    //            file is in non-blocking mode. If it is, the wait time will be 0 (i.e.
+    //            the function will return immediately with an EWOULDBLOCK error if
+    //            no byte is immediately available). If the file is blocking,
+    //            the max wait time for the 1st byte will be max_time (see below).
+    //            If initial_wait > max_time, initial_wait will be reduced to max_time.
     // max_time: If > 0, this is the maximum number of milliseconds the function
     //             will take, regardless if waiting or reading.
-    //             Even if the file descriptor is non-blocking, the function will
+    //             If initial_wait<0 and the file descriptor is blocking, the function will
     //             wait up to this time for a first byte of data (because more_data
     //             only kicks in after the 1st byte has been received).
     //           If < 0 the function will continue reading until either more_wait
-    //             or EOF or an error stops it. If the file is non-blocking and no
-    //             data is immediately available, this will be reported as an
+    //             or EOF or an error stops it. If the file is non-blocking, initial_wait < 0
+    //             and no data is immediately available, this will be reported as an
     //             EWOULDBLOCK error.
     //           If == 0 the function will read all data that is immediately
     //             available. If no data is immediately available, an EWOULDBLOCK
@@ -514,9 +522,9 @@ class File
     //
     // max_time is a rough guidance intended to prevent blocking indefinitely.
     // It is not a precise timing device.
-    int read(void* buf, size_t bufsz, int more_wait = 0, int max_time = -1)
+    int read(void* buf, size_t bufsz, int more_wait = 0, int max_time = -1, int initial_wait = -1)
     {
-        return tail(buf, bufsz, more_wait, max_time, true, false);
+        return tail(buf, bufsz, initial_wait, more_wait, max_time, true, false);
     }
 
     // Reads until all data has been read (within the time limits) and stores
@@ -527,17 +535,23 @@ class File
     //            more_wait <= 0 causes the function to end the first time data becomes
     //            unavailable (except EINTR, which is handled transparently)
     //            Note that more_wait only comes into play after the 1st byte has
-    //            been read, i.e. a blocking file will block until at least 1 byte
-    //            is read OR max_time expires.
+    //            been read. The max time to wait for the 1st byte is governed by
+    //            initial_wait and max_time (see below).
+    // initial_wait: Maximum number of milliseconds to wait for the 1st byte if it
+    //            is not already available. If < 0, the wait depends on whether the
+    //            file is in non-blocking mode. If it is, the wait time will be 0 (i.e.
+    //            the function will return immediately if no byte is immediately
+    //            available). If the file is blocking, the max wait time for the 1st
+    //            byte will be max_time (see below).
+    //            If initial_wait > max_time, initial_wait will be reduced to max_time.
     // max_time: If > 0, this is the maximum number of milliseconds the function
     //             will take, regardless if waiting or reading.
-    //             Even if the file descriptor is non-blocking, the function will
+    //             If initial_wait<0 and the file descriptor is blocking, the function will
     //             wait up to this time for a first byte of data (because more_data
     //             only kicks in after the 1st byte has been received).
     //           If < 0 the function will continue reading until either more_wait
-    //             or EOF or an error stops it. If the file is non-blocking and no
-    //             data is immediately available, this will be reported as an
-    //             EWOULDBLOCK error.
+    //             or EOF or an error stops it. If the file is non-blocking, initial_wait < 0
+    //             and no data is immediately available, the function returns immediately.
     //           If == 0 the function will read all data that is immediately
     //             available. If no data is immediately available, this function
     //             returns 0 REGARDLESS of the non-blocking state
@@ -552,9 +566,9 @@ class File
     //
     // max_time is a rough guidance intended to prevent blocking indefinitely.
     // It is not a precise timing device.
-    int tail(void* buf, size_t bufsz, int more_wait = 0, int max_time = -1)
+    int tail(void* buf, size_t bufsz, int more_wait = 0, int max_time = -1, int initial_wait = -1)
     {
-        return tail(buf, bufsz, more_wait, max_time, false, true);
+        return tail(buf, bufsz, initial_wait, more_wait, max_time, false, true);
     }
 
     // Tries to create a new directory dir with given mode. Returns null if creation
@@ -617,7 +631,8 @@ class File
 
   private:
     // Combines read() and tail() through use of report_ewouldblock and do_tail
-    int tail(void* buf, size_t bufsz, int more_wait, int max_time, bool report_ewouldblock, bool do_tail)
+    int tail(void* buf, size_t bufsz, int initial_wait, int more_wait, int max_time, bool report_ewouldblock,
+             bool do_tail)
     {
         if (hasError())
             return -1;
@@ -649,15 +664,17 @@ class File
         void* bufstart = buf;
         int retval;
 
-        int initial_wait = max_time;
-        if (max_time == INT_MAX)
+        if (initial_wait < 0)
         {
+            initial_wait = max_time;
             retval = fcntl(fd, F_GETFL);
             if (!checkError(retval))
                 return retval;
             if ((retval & O_NONBLOCK) != 0)
                 initial_wait = 0;
         }
+        else if (initial_wait > max_time)
+            initial_wait = max_time;
 
     wait_for_data:
         retval = ::poll(fds, nfds, initial_wait);
