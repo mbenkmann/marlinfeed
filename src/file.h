@@ -557,6 +557,64 @@ class File
         return tail(buf, bufsz, more_wait, max_time, false, true);
     }
 
+    // Tries to create a new directory dir with given mode. Returns null if creation
+    // failed and errno is set. Note in particular that creation will fail if there
+    // is already an existing directory.
+    // If dir ends in one or more '?' characters, these will be replaced with
+    // numbers starting from 0 and increasing until all '?' are 9 or a directory
+    // could be created.
+    // If creation succeeds and dir contains no '?', the function returns dir.
+    // If creation succeeds and dir contains '?', the function returns the name
+    // of the created directory, alloc'd with malloc(). Don't forget to free() it
+    // if necessary.
+    static const char* createDirectory(const char* dir, mode_t mode)
+    {
+        void* tofree = 0;
+        int a = 0;
+        int b = 0;
+        int len = strlen(dir);
+        char* dir2 = 0;
+
+        if (len > 0 && dir[len - 1] == '?')
+        {
+            dir2 = strdup(dir);
+            dir = dir2;
+            tofree = (void*)dir;
+            b = len;
+            for (a = b; a > 0; dir2[--a] = '0')
+                if (dir[a - 1] != '?')
+                    break;
+
+            // dir[a] is the 1st '0'
+            // dir[b] == 0
+        }
+
+        for (;;)
+        {
+            int retval = mkdir(dir, mode);
+            if (retval == 0)
+                return dir;
+
+            int i = b - 1;
+            while (i >= a)
+            {
+                dir2[i]++;
+                if (dir2[i] <= '9')
+                    break;
+                dir2[i] = '0';
+                --i;
+            }
+
+            if (i < a)
+                break;
+        }
+
+        int errno_saved = errno;
+        free(tofree);
+        errno = errno_saved;
+        return 0;
+    }
+
   private:
     // Combines read() and tail() through use of report_ewouldblock and do_tail
     int tail(void* buf, size_t bufsz, int more_wait, int max_time, bool report_ewouldblock, bool do_tail)
