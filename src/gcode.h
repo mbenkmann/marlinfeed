@@ -471,6 +471,25 @@ class Reader
         return i;
     }
 
+    // Extracts up to sz bytes of buffered data from this reader and stores them
+    // into dest. Returns number of bytes extracted.
+    // If raw() returns 0, the state is as if discard() had been called.
+    // raw() can be called repeatedly until it returns 0 to extract all
+    // buffered data.
+    int raw(char* dest, int sz)
+    {
+        if (sz > bufidx)
+            sz = bufidx;
+        memcpy(dest, buf, sz);
+        memmove(buf, buf + sz, bufidx - sz);
+        bufidx -= sz;
+        comidx = 0;
+        ready = 0;
+        full_scan = (bufidx > 0);
+        in_comment = false;
+        return sz;
+    }
+
     // Sets the whitespace compression level. See also commentChar().
     // 0: keep all whitespace
     // 1: convert sequences of whitespace to a single space

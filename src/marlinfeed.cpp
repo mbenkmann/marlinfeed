@@ -19,6 +19,7 @@
  * SOFTWARE.
  */
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <memory>
 #include <signal.h>
@@ -45,7 +46,10 @@ enum optionIndex
     UNKNOWN,
     HELP,
     IOERROR,
-    VERBOSE
+    VERBOSE,
+    PORT,
+    LOCALHOST,
+    API
 };
 const option::Descriptor usage[] = {
     {UNKNOWN, 0, "", "", Arg::Unknown,
@@ -54,18 +58,39 @@ const option::Descriptor usage[] = {
      "which must be compatible with Marlin's serial port protocol.\n"
      "<printdev> can be either a TTY or a Unix Domain Socket.\n"
      "Pass '-' or '/dev/stdin' as <infile> to read from stdin.\n"
-     "Pass an <infile> argument of the following form\n"
-     "    [http://|https://][localhost][:<port>/]<uploadpath>\n"
-     "to watch directory <uploadpath> for new/modified gcode files and optionally listen for "
-     "Octoprint API compatible connections on <port> that will upload to <uploadpath>.\n"
-     "If 'localhost' is specified, only connections from the same machine will be accepted.\n"
-     "If 'https://' is specified, the connections have to be secured via TLS.\n"
-     "If no <infile> is passed, '-' is assumed.\n"
-     "Communication is echoed to stdout."
+     "If an <infile> is a directory, it will be watched for "
+     "new/modified gcode files that will automatically be printed. Files with a timestamp "
+     "older than the time Marlinfeed is started won't be printed.\n"
+     "If no --api and no <infile> is passed, '-' is assumed.\n"
+     "Communication is echoed to stdout.\n"
+     "\n"
+     "Octoprint API:\n"
+     "Use the --api switch to make Marlinfeed listen for incoming connections and serve them "
+     "with an Octoprint compatible API. Uploaded print files will be stored in the first watch "
+     "directory in the <infile> ... list. If no directories are listed, a temporary directory under /tmp "
+     "will be created and used.\n"
+     "\n"
+     "Security:\n"
+     "Marlinfeed offers no access control features other than the --localhost switch. To make Marlinfeed "
+     "available over an insecure network, use something like haproxy(1). A very good authentication "
+     "solution is the use of client certificates. A quick and easy tool to create a set of "
+     "client, server and CA certificates is certificate-assembler(1) which is part of the certifidog "
+     "package.\n"
      "\n\n"
      "Options:"},
     {HELP, 0, "", "help", Arg::None, "  \t--help  \tPrint usage and exit."},
     {VERBOSE, 0, "v", "verbose", Arg::None, "  -v, \t--verbose  \tIncrease verbosity. Can be used multiple times."},
+    {API, 0, "", "api", Arg::Required,
+     " \t--api=<base-url>  \tListen for incoming connections with an Octoprint compatible API that clients will access "
+     "as <base-url>/api . If --port is not specified and <base-url> contains a port, the latter port will be the port "
+     "Marlinfeed will listen on."},
+    {PORT, 0, "p", "port", Arg::Numeric,
+     "  -p<num>, \t--port=<num>  \tPort to listen on for API connections. Defaults to 8080 unless derived from "
+     "<base-url> (see above)."},
+    {LOCALHOST, 0, "", "localhost", Arg::None,
+     " \t--localhost  \tLimit API connections to connections from the same machine Marlinfeed is running on. "
+     "Most useful when combined with something like haproxy(1) to make Marlinfeed available to a wider network with "
+     "access controls."},
     {IOERROR, 0, "e", "ioerror", Arg::IOError,
      "  -e<arg>, \t--ioerror[=<arg>]"
      "  \tHow to handle an error on <infile> or <printdev>.\v'next' reinitializes communication with"
@@ -76,12 +101,16 @@ const option::Descriptor usage[] = {
      "  marlinfeed gcode/init.gcode gcode/benchy.gcode /dev/ttyUSB0 \n"
      "  marlinfeed --ioerror=next 1stprint.gcode 2ndprint.gcode /dev/ttyUSB0 \n"
      "  marlinfeed ./upload /dev/ttyUSB0 \n"
-     "  marlinfeed --ioerror=quit :8080/upload /dev/ttyUSB0 \n"
-     "  marlinfeed https://:443//var/cache/marlinfeed /dev/ttyUSB0 \n"
+     "  marlinfeed --ioerror=quit http://my-printer:80 upload /dev/ttyUSB0 \n"
+     "      listens for connections on port 80.\n\n"
+     "  marlinfeed --localhost https://my-printer /dev/ttyUSB0 \n"
+     "      listens for localhost connections on port 8080. Needs some form of proxy to implement TLS.\n\n"
+     "  marlinfeed -p 6000 https://my-printer:443/ /var/cache/marlinfeed /dev/ttyUSB0 \n"
+     "      listens for connections on port 6000. Needs some form of proxy.\n"
      "\n"},
     {0, 0, 0, 0, 0, 0}};
 
-const char* NEW_SOCKET_CONNECTION = "New socket connection => Forking child\n";
+const char* NEW_SOCKET_CONNECTION = "New socket connection => Handled by child with PID %d\n";
 
 // Maximum number of milliseconds we don't get a non-error reply from the printer.
 // This aborts the current job if the printer keeps replying to everything we send
@@ -95,10 +124,10 @@ const int MAX_TIME_SILENCE = 120000;
 
 bool ioerror_next;
 int verbosity = 0;
-const char* upload_dir = "/dev/null/";
 
 bool handle(File& out, File& serial, const char* infile, File* sock, const char** e, int* iop);
 void handle_socket_connection(int fd);
+void socketTest();
 
 // FIFO::filter() for removing file names with no known GCODE extension
 struct GCodeExtension
@@ -287,6 +316,9 @@ class PrinterState
 
 File out("stdout", 1);
 
+const char* api_base_url = 0;
+const char* upload_dir = 0;
+
 int main(int argc, char* argv[])
 {
     signal(SIGCHLD, SIG_IGN); // automatic zombie removal
@@ -332,9 +364,38 @@ int main(int argc, char* argv[])
     // whatever is currently in the upload directories.
     dirScanner.refill(infile_queue);
 
-    // If we don't have any infile arguments, assume "-" (i.e. stdin)
-    if (parse.nonOptionsCount() == 1)
-        infile_queue.put(strdup("-"));
+    long port = 8080;
+    if (options[API])
+    {
+        api_base_url = options[API].last()->arg;
+
+        const char* p = strstr(api_base_url, ":/");
+        if (p == 0)
+            p = api_base_url;
+        else
+            ++p;
+        p = strchr(p, ':');
+
+        if (p)
+            port = strtol(p + 1, 0, 10);
+
+        if (options[PORT])
+            port = strtol(options[PORT].last()->arg, 0, 10);
+
+        if (port < 10 || port > 65535)
+        {
+            fprintf(stderr, "%s %ld\n", "Illegal port specified:", port);
+            exit(1);
+        }
+    }
+    else
+    {
+        if (options[LOCALHOST] || options[PORT])
+        {
+            fprintf(stderr, "%s\n", "--localhost and --port don't work without --api!");
+            exit(1);
+        }
+    }
 
     for (int i = 0; i < parse.nonOptionsCount() - 1; ++i)
     {
@@ -343,39 +404,6 @@ int main(int argc, char* argv[])
         {
             infile_queue.put(strdup(inf));
             continue;
-        }
-        bool http = strncmp(inf, "http://", 7) == 0;
-        bool https = strncmp(inf, "https://", 8) == 0;
-        const char* host = "";
-        if (http)
-            inf += 7;
-        if (https)
-            inf += 8;
-        bool localhost = strncmp(inf, "localhost", 9) == 0;
-        if (localhost)
-        {
-            inf += 9;
-            host = "localhost";
-        }
-        int port = 0;
-        if (http)
-            port = 80;
-        if (https)
-            port = 443;
-        if (inf[0] == ':')
-        {
-            char* endptr;
-            port = strtol(inf + 1, &endptr, 10);
-            if (port < 10)
-            {
-                fprintf(stderr, "%s %d\n", "Illegal port specified for listening:", port);
-                exit(1);
-            }
-            inf = endptr;
-            if (inf[0] == '/')
-                inf++;
-            else
-                inf = ""; // Cause a "Don't understand..." error to trigger further down
         }
 
         struct stat statbuf;
@@ -386,40 +414,53 @@ int main(int argc, char* argv[])
             exit(1);
         }
 
-        if (port > 0 && !S_ISDIR(statbuf.st_mode))
-        {
-            fprintf(stderr, "Not a directory: %s\n", inf);
-            exit(1);
-        }
-
         if (S_ISDIR(statbuf.st_mode))
+        {
             dirScanner.addDir(inf);
+            if (upload_dir == 0)
+                upload_dir = strdup(inf);
+        }
         else
             infile_queue.put(strdup(inf));
+    }
 
-        if (port > 0)
+    if (api_base_url != 0)
+    {
+        char* listen_address;
+        const char* host = "";
+        if (options[LOCALHOST])
+            host = "localhost";
+        assert(0 <= asprintf(&listen_address, "%s:%ld", host, port));
+        sock = new File(listen_address);
+        sock->action("listening on");
+        sock->listen();
+        sock->setNonBlock(true);
+        if (sock->hasError())
         {
-            if (sock != 0)
-            {
-                fprintf(stderr, "%s\n", "Listening on multiple ports is not supported at this time!");
-                exit(1);
-            }
-
-            upload_dir = strdup(inf);
-
-            char* listen_address;
-            assert(0 <= asprintf(&listen_address, "%s:%d", host, port));
-            sock = new File(listen_address);
-            sock->action("listening on");
-            sock->listen();
-            sock->setNonBlock(true);
-            if (sock->hasError())
-            {
-                fprintf(stderr, "%s\n", sock->error());
-                exit(1);
-            }
-            sock->action("accepting connections on");
+            fprintf(stderr, "%s\n", sock->error());
+            exit(1);
         }
+        sock->action("accepting connections on");
+
+        if (upload_dir == 0)
+        {
+            // Create temporary directory
+            upload_dir = File::createDirectory("/tmp/marlinfeed-????", 0700);
+            if (upload_dir == 0)
+            {
+                perror("mkdir");
+                exit(1);
+            }
+            dirScanner.addDir(upload_dir);
+        }
+
+        fprintf(stdout, "Listening on port %ld. Uploading to %s. API base: %s\n", port, upload_dir, api_base_url);
+    }
+    else // If we're not listening
+    {
+        // If we don't have any infile arguments, assume "-" (i.e. stdin)
+        if (parse.nonOptionsCount() == 1)
+            infile_queue.put(strdup("-"));
     }
 
     ioerror_next = false; // default
@@ -429,6 +470,9 @@ int main(int argc, char* argv[])
         ioerror_next = false; // override default if --ioerror=quit on command line
 
     printerState = PrinterState::Disconnected;
+
+    if (strcmp(api_base_url, "Debug") == 0)
+        socketTest();
 
     for (;;)
     {
@@ -447,8 +491,6 @@ int main(int argc, char* argv[])
                 int connfd = sock->accept();
                 if (connfd >= 0)
                 {
-                    if (verbosity > 0)
-                        out.writeAll(NEW_SOCKET_CONNECTION, strlen(NEW_SOCKET_CONNECTION));
                     pid_t childpid = fork();
                     if (childpid < 0)
                         perror("fork");
@@ -459,6 +501,8 @@ int main(int argc, char* argv[])
                         _exit(0);
                     }
                     close(connfd);
+                    if (verbosity > 0)
+                        fprintf(stdout, NEW_SOCKET_CONNECTION, childpid);
                 }
                 else
                 {
@@ -706,7 +750,7 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
                 action_on_printer = true;
                 if (input->startsWith("ok\b"))
                 {
-                    if (verbosity > 1)
+                    if (verbosity > 2)
                         stdoutbuf.put(input); // echo to stdout
                     stall_counter = 0;
                     if (ignore_ok)
@@ -800,7 +844,7 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
             {
                 action_on_printer = true;
                 gcode::Line* gcode_to_send = new gcode::Line(marlinbuf.next());
-                if (verbosity > 1)
+                if (verbosity > 2)
                     stdoutbuf.put(gcode_to_send); // echo to stdout
                 serial.writeAll(gcode_to_send->data(), gcode_to_send->length());
             }
@@ -815,8 +859,6 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
             int connfd = sock->accept();
             if (connfd >= 0)
             {
-                if (verbosity > 0)
-                    stdoutbuf.put(new gcode::Line(NEW_SOCKET_CONNECTION));
                 pid_t childpid = fork();
                 if (childpid < 0)
                 {
@@ -831,6 +873,8 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
                     _exit(0);
                 }
                 close(connfd);
+                if (verbosity > 0)
+                    fprintf(stdout, NEW_SOCKET_CONNECTION, childpid);
             }
             else
             {
@@ -887,7 +931,7 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
 }
 
 const char* HTTP_HEADERS = "HTTP/1.1 %d %s\r\n"
-                           "Cache-Control: no-store\r\n"
+                           "%sCache-Control: no-store\r\n"
                            "Content-Length: %d\r\n"
                            "Content-Type: %s\r\n"
                            "\r\n%s";
@@ -895,10 +939,11 @@ const char* HTTP_HEADERS = "HTTP/1.1 %d %s\r\n"
 enum HTTPCode
 {
     OK = 0,
-    NotFound = 1
+    NotFound = 1,
+    Created = 2
 };
-int HTTPCodeNum[] = {200, 404};
-const char* HTTPCodeDesc[] = {"OK", "Not Found"};
+int HTTPCodeNum[] = {200, 404, 201};
+const char* HTTPCodeDesc[] = {"OK", "Not Found", "Created"};
 
 const char* VERSION_JSON = "{\r\n"
                            "  \"api\": \"0.1\",\r\n"
@@ -927,16 +972,28 @@ const char* HTTP_LOGIN = "{\r\n"
                          "  \"name\": \"_api\""
                          "}\r\n";
 
+const char* HTTP_CREATED_JSON = "{\r\n"
+                                "  \"done\": true,\r\n"
+                                "  \"files\": {\r\n"
+                                "    \"local\": {\r\n"
+                                "      \"origin\": \"local\",\r\n"
+                                "      \"refs\": {\r\n"
+                                "      }\r\n"
+                                "    }\r\n"
+                                "  }\r\n"
+                                "}\r\n";
+
 int wait_empty_line(gcode::Reader& client_reader)
 {
     int contentlength = 0;
-    client_reader.whitespaceCompression(2);
     for (;;)
     {
         auto line = client_reader.next();
-        if (line == 0)
+        if (line == 0 || line->length() == 0)
             break;
-        if (line->length() == 1)
+        if (verbosity > 1)
+            out.writeAll(line->data(), line->length());
+        if (line->data()[0] == '\n' || (line->data()[0] == '\r' && line->data()[1] == '\n'))
             break;
         int idx;
         if (0 < (idx = line->startsWith("Content-Length:\b")))
@@ -960,7 +1017,8 @@ void http_error(File& client, gcode::Reader& client_reader, HTTPCode code)
 
     const char* content = "<!DOCTYPE html><html><head><title>Error</title></head><body><h1>Error</h1></body></html>";
     char* reply;
-    len = asprintf(&reply, HTTP_HEADERS, HTTPCodeNum[code], HTTPCodeDesc[code], strlen(content), "text/html", content);
+    len = asprintf(&reply, HTTP_HEADERS, HTTPCodeNum[code], HTTPCodeDesc[code], "", strlen(content), "text/html",
+                   content);
     if (len > 0)
     {
         client.writeAll(reply, len);
@@ -977,7 +1035,8 @@ const char* login_json()
     return "";
 }
 
-void http_json(const char* json, File& client, gcode::Reader& client_reader, HTTPCode code)
+void http_json(const char* json, File& client, gcode::Reader& client_reader, HTTPCode code,
+               const char* extra_headers = "")
 {
     int len = wait_empty_line(client_reader);
     if (len < 65536)
@@ -986,18 +1045,220 @@ void http_json(const char* json, File& client, gcode::Reader& client_reader, HTT
         client.read(buffy, len, 1000);
     }
     char* reply;
-    len = asprintf(&reply, HTTP_HEADERS, HTTPCodeNum[code], HTTPCodeDesc[code], strlen(json), "application/json", json);
+    len = asprintf(&reply, HTTP_HEADERS, HTTPCodeNum[code], HTTPCodeDesc[code], extra_headers, strlen(json),
+                   "application/json", json);
     if (len > 0)
     {
         client.writeAll(reply, len);
-        if (verbosity > 0)
+        if (verbosity > 1)
             out.writeAll(reply, len);
+    }
+    _exit(1);
+}
+
+void upload(File& client, gcode::Reader& client_reader)
+{
+    client_reader.whitespaceCompression(0); // preserve whitespace
+    client_reader.commentChar('\n');        // do not handle comments
+    int contentlength = wait_empty_line(client_reader);
+    int contentread = 0;
+
+    const char* boundary = 0;
+    int len;
+
+    char* fname = 0;
+    char* file_line = 0;
+    char* finished_fname = 0;
+
+    bool wait_for_file_start = false;
+
+    // create temporary file
+    char fpath[1024];
+    snprintf(fpath, sizeof(fpath), "%s/upload-????", upload_dir);
+    const char* tempname = File::createFile(fpath, 0644);
+    if (tempname == 0)
+    {
+        perror(fpath);
+        _exit(1);
+    }
+
+    File tmp(tempname);
+
+    while (client_reader.hasNext())
+    {
+        unique_ptr<gcode::Line> line(client_reader.next());
+        contentread += line->length();
+
+        if (boundary == 0 && line->startsWith("--"))
+        {
+            if (verbosity > 1)
+                out.writeAll(line->data(), line->length());
+            boundary = strdup(line->data());
+        }
+        else if (0 != (len = line->startsWith(boundary)) && (line->length() == len))
+        {
+            if (verbosity > 1)
+                out.writeAll(line->data(), line->length());
+
+            if (file_line)
+            {
+                out.clearError(); // In case we wrote too fast and ran into EWOULDBLOCK
+
+                // Translate evil characters to _
+                finished_fname = strdup(fname);
+                for (unsigned char* p = (unsigned char*)finished_fname; *p != 0; p++)
+                    if (!(*p > 127 || isalnum(*p) || *p == '_' || *p == '-' || *p == '+' || *p == '.' || *p == ','))
+                        *p = '_';
+
+                if (verbosity > 0)
+                {
+                    char msg[1024];
+                    int len =
+                        snprintf(msg, sizeof(msg), "Renaming temporary file '%s' => '%s'\n", tempname, finished_fname);
+                    if (len >= (int)sizeof(msg))
+                        len = sizeof(msg) - 1;
+                    out.writeAll(msg, len);
+                }
+
+                char* newpath;
+                assert(0 < asprintf(&newpath, "%s/%s", upload_dir, finished_fname));
+                tmp.move(newpath);
+                tmp.close();
+
+                if (tmp.hasError())
+                    fprintf(stderr, "%s\n", tmp.error());
+
+                free(fname);
+                free(file_line);
+                fname = 0;
+                file_line = 0;
+                break;
+            }
+        }
+        else if (fname != 0)
+        {
+            if (wait_for_file_start)
+            {
+                if (verbosity > 1)
+                    out.writeAll(line->data(), line->length());
+                wait_for_file_start = !(line->data()[0] == '\r' && line->data()[1] == '\n');
+            }
+            else
+            {
+                if (file_line)
+                {
+                    if (verbosity > 2)
+                        out.writeAll(".", 1); // one dot per line
+                    tmp.writeAll(file_line, strlen(file_line));
+                }
+                else
+                {
+                    if (verbosity > 0)
+                    {
+                        char msg[512];
+                        int len = snprintf(msg, sizeof(msg), "Storing upload data in temporary file '%s'\n", tempname);
+                        if (len >= 512)
+                            len = 511;
+                        out.writeAll(msg, len);
+                    }
+
+                    tmp.open(O_WRONLY);
+                }
+                free(file_line);
+                file_line = strdup(line->data());
+            }
+        }
+        else if ((finished_fname == 0) && line->startsWith("Content-Disposition:\bform-data\b"))
+        {
+            if (verbosity > 1)
+                out.writeAll(line->data(), line->length());
+            fname = line->getString("filename");
+            wait_for_file_start = (fname != 0);
+        }
+        else if (verbosity > 1)
+            out.writeAll(line->data(), line->length());
+    }
+
+    if (tmp.fileDescriptor() >= 0)
+        fprintf(stderr, "Premature end of upload data\n");
+
+    if (finished_fname)
+    {
+        // Read remainder of multipart MIME data
+        int dis = client_reader.discard();
+        contentread += dis;
+        contentlength -= contentread;
+        if (contentlength > 0 && contentlength < 65536)
+        {
+            char buf[contentlength];
+            client.read(buf, sizeof(buf), 200, 2000, 200);
+        }
+
+        const char* location;
+        if (0 >= asprintf((char**)&location, "Location: %s/api/local/%s\r\n", api_base_url, finished_fname))
+            location = "";
+        char* reply;
+        int len = asprintf(&reply, HTTP_HEADERS, HTTPCodeNum[Created], HTTPCodeDesc[Created], location,
+                           strlen(HTTP_CREATED_JSON), "application/json", HTTP_CREATED_JSON);
+        if (len > 0)
+        {
+            client.writeAll(reply, len);
+            if (verbosity == 1)
+                out.writeAll(location, strlen(location));
+            if (verbosity > 1)
+                out.writeAll(reply, len);
+        }
     }
     _exit(1);
 }
 
 void handle_socket_connection(int fd)
 {
+    // union {
+    //     struct sockaddr sock;
+    //     struct sockaddr_in6 ipv6;
+    //     struct sockaddr_in ipv4;
+    // } addr;
+
+    // socklen_t socklen = sizeof(addr);
+    // if (getsockname(fd, &addr.sock, &socklen) != 0)
+    // {
+    //     perror("getsockname");
+    //     addr.sock.sa_family = 0;
+    // }
+
+    // char buffy[128];
+    // const char* addr_str;
+    // char* url;
+    // switch (addr.sock.sa_family)
+    // {
+    //     case AF_INET:
+    //         addr_str = inet_ntop(addr.ipv4.sin_family, &addr.ipv4.sin_addr, buffy, sizeof(buffy));
+    //         asprintf(&url, "%s%s:%d", location_prefix, addr_str, location_port);
+    //         break;
+    //     case AF_INET6:
+    //         addr_str = inet_ntop(addr.ipv6.sin6_family, &addr.ipv6.sin6_addr, buffy, sizeof(buffy));
+    //         asprintf(&url, "%s[%s]:%d", location_prefix, addr_str, location_port);
+    //         break;
+    //     default:
+    //         asprintf(&url, "%slocalhost:%d", location_prefix, location_port);
+    // }
+
+    // File f("/tmp/upload.raw");
+    // f.open(O_CREAT | O_EXCL | O_WRONLY, 0644);
+    // char buf[65536];
+    // int sz = client_reader.raw(buf, sizeof(buf));
+    // f.writeAll(buf, sz);
+    // for (;;)
+    // {
+    //     sz = client.read(buf, sizeof(buf), 5000, -1, 5000);
+    //     if (sz <= 0)
+    //         break;
+    //     f.writeAll(buf, sz);
+    // }
+    // f.close();
+    // _exit(1);
+
     File client("API request", fd);
     gcode::Reader client_reader(client);
     client_reader.whitespaceCompression(1);
@@ -1036,8 +1297,50 @@ void handle_socket_connection(int fd)
             request->slice(5);
             if (request->startsWith("login\b"))
                 http_json(login_json(), client, client_reader, OK);
+            if (request->startsWith("files/local\b"))
+                upload(client, client_reader);
         }
     }
 
     http_error(client, client_reader, NotFound);
+}
+
+void socketTest()
+{
+    int fd[2];
+    assert(0 == socketpair(AF_LOCAL, SOCK_STREAM, 0, fd));
+    pid_t childpid = fork();
+    assert(childpid >= 0);
+    if (childpid == 0)
+    {
+        close(fd[0]);
+        File uploadData("test/upload.raw");
+        uploadData.open(O_RDONLY);
+        File sock("Teststream", fd[1]);
+        char buf[65536];
+        for (;;)
+        {
+            int sz = uploadData.read(buf, sizeof(buf));
+            if (sz <= 0)
+                break;
+            sock.writeAll(buf, sz);
+        }
+
+        out.setNonBlock(false);
+        for (;;)
+        {
+            int sz = sock.read(buf, sizeof(buf));
+            if (sz <= 0)
+                break;
+            out.writeAll(buf, sz);
+        }
+
+        fprintf(stdout, "Connection closed.\n");
+
+        _exit(0);
+    }
+
+    close(fd[1]);
+    handle_socket_connection(fd[0]);
+    _exit(0);
 }

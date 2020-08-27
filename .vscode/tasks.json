@@ -25,8 +25,11 @@
             "command": "make 'OPTIMIZE=$(DEBUG)' marlinfeed",
             "problemMatcher": [
                 "$gcc"
-            ]
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
         }
-
     ]
 }

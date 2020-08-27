@@ -96,6 +96,8 @@ class File
     //
     // NOTE: The passed file descriptor is NOT closed on destruction of the File.
     //       Compare open().
+    //
+    // NOTE: The pointer fpath is used directly. DO NOT FREE!
     File(const char* _fpath, int filedes = -1)
         : fpath(_fpath), tit(""), err(0), fd(filedes), eof(false), close_on_destruction(false)
     {
@@ -225,6 +227,20 @@ class File
         if (hasError())
             return false;
         int retval = ::unlink(fpath);
+        return checkError(retval);
+    }
+
+    // If the file is not in error state, assigns newpath to this file as its new path,
+    // THEN attempts to move the filesystem object from the old to the new path via rename(2).
+    //
+    // NOTE: The pointer newpath is used directly. DO NOT FREE!
+    bool move(const char* newpath)
+    {
+        if (hasError())
+            return false;
+        const char* oldpath = fpath;
+        fpath = newpath;
+        int retval = ::rename(oldpath, newpath);
         return checkError(retval);
     }
 
@@ -616,6 +632,67 @@ class File
                 if (dir2[i] <= '9')
                     break;
                 dir2[i] = '0';
+                --i;
+            }
+
+            if (i < a)
+                break;
+        }
+
+        int errno_saved = errno;
+        free(tofree);
+        errno = errno_saved;
+        return 0;
+    }
+
+    // Tries to create a new file fpath with given mode. Returns null if creation
+    // failed and errno is set. Note in particular that creation will fail if there
+    // is already an existing file.
+    // If fpath ends in one or more '?' characters, these will be replaced with
+    // numbers starting from 0 and increasing until all '?' are 9 or a file
+    // could be created.
+    // If creation succeeds and fpath contains no '?', the function returns fpath.
+    // If creation succeeds and fpath contains '?', the function returns the name
+    // of the created file, alloc'd with malloc(). Don't forget to free() it
+    // if necessary.
+    static const char* createFile(const char* fpath, mode_t mode)
+    {
+        void* tofree = 0;
+        int a = 0;
+        int b = 0;
+        int len = strlen(fpath);
+        char* fpath2 = 0;
+
+        if (len > 0 && fpath[len - 1] == '?')
+        {
+            fpath2 = strdup(fpath);
+            fpath = fpath2;
+            tofree = (void*)fpath;
+            b = len;
+            for (a = b; a > 0; fpath2[--a] = '0')
+                if (fpath[a - 1] != '?')
+                    break;
+
+            // fpath[a] is the 1st '0'
+            // fpath[b] == 0
+        }
+
+        for (;;)
+        {
+            int retval = ::open(fpath, O_CREAT | O_EXCL | O_RDWR, mode);
+            if (retval >= 0)
+            {
+                ::close(retval);
+                return fpath;
+            }
+
+            int i = b - 1;
+            while (i >= a)
+            {
+                fpath2[i]++;
+                if (fpath2[i] <= '9')
+                    break;
+                fpath2[i] = '0';
                 --i;
             }
 
