@@ -1,0 +1,36 @@
+Some ideas. Won't necessarily all be implemented.
+
+--gpio=1+,2-,4^HUP,6vUSR1
+
+Set GPIO pin 1 to HIGH
+Set GPIO pin 2 to LOW
+Watch GPIO pin 4 and on a POSITIVE EDGE, treat it as if marlinfeed had received SIGHUP
+Watch GPIO pin 6 and on a NEGATIVE EDGE, treat it as if marlinfeed had received SIGUSR1
+
+SIGHUP: abort current print, continue with next infile even if ioerror==quit.
+SIGINT: like SIGTERM
+SIGQUIT: wait for the end of the current print, cool down printer, call /sbin/poweroff
+SIGTERM: abort current print, cool down printer, then terminate; be prepared to be shot down
+         by SIGKILL before cooling down has finished.
+
+
+Print Statistics:
+  Min, Max, Avg Buffer fill level
+  Min, Max, Avg. Transfer rate (bps, gcode/s)  determined over 1s intervals
+
+
+Torture test generator that runs the head in a 1s circle with binary search of 
+segment size to determine the segment size at which the time starts to increase
+over 1s.
+  * generate torture test GCode
+  * output if baud rate is limiting factor
+  * outputs the determined resolution (i.e. microseconds time of determined segment)
+  * output should be to stdout with informational stuff as comments in the end so that
+    you can either pipe into a file or just read on console.
+  * if --torture is passed, first send all listed infiles to the printer, so you can
+    have a gcode file with code to setup jerk,... settings as output by your slicer
+    before the torture test measurings take place.
+
+Support for Unix Domain Sockets as infiles. That way one could easily make an interactive session
+via socat. If a UDS is infile, then data received from the printer as well as error messages
+need to be copied to the UDS, too.  
