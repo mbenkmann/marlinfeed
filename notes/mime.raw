@@ -1,0 +1,161 @@
+--boundary_.oOo._bv097qc4gjXX2lIV1Abtaofbt8h3VFst
+Content-Disposition: form-data; name="path"
+Content-Type: text/plain
+
+
+--boundary_.oOo._bv097qc4gjXX2lIV1Abtaofbt8h3VFst
+Content-Disposition: form-data; name="file"; filename="test.gcode"
+Content-Type: application/octet-stream
+
+;FLAVOR:Marlin
+;TIME:7
+;Filament used: 0.000381678m
+;Layer height: 0.2
+;MINX:194.7
+;MINY:194.7
+;MINZ:0.2
+;MAXX:195.3
+;MAXY:195.3
+;MAXZ:1
+;POSTPROCESSED
+;Generated with Cura_SteamEngine 4.6.1
+M140 S50
+M105
+M190 S50
+M104 S200
+M105
+M109 S200
+M82 ;absolute extrusion mode
+M201 X500.00 Y500.00 Z100.00 E5000.00 ;Setup machine max acceleration
+M203 X500.00 Y500.00 Z10.00 E50.00 ;Setup machine max feedrate
+M204 P500.00 R1000.00 T500.00 ;Setup Print/Retract/Travel acceleration
+M205 X8.00 Y8.00 Z0.40 E5.00 ;Setup Jerk
+M220 S100 ;Reset Feedrate
+M221 S100 ;Reset Flowrate
+
+G28 ;Home
+
+G92 E0 ;Reset Extruder
+G1 Z2.0 F3000 ;Move Z Axis up
+G1 X10.1 Y20 Z0.2 F5000.0 ;Move to start position
+G1 X10.1 Y200.0 Z0.2 F1500.0 E15 ;Draw the first line
+G1 X10.4 Y200.0 Z0.2 F5000.0 ;Move to side a little
+G1 X10.4 Y20 Z0.2 F1500.0 E30 ;Draw the second line
+G92 E0 ;Reset Extruder
+G1 Z2.0 F3000 ;Move Z Axis up
+G92 E0
+G92 E0
+G1 F2700 E-5
+;LAYER_COUNT:5
+;LAYER:0
+M117 test 1/5
+M107
+;MESH:test.stl
+G0 F6000 X194.7 Y195.3 Z0.2
+;TYPE:WALL-OUTER
+G1 F2700 E0
+G1 F600 X194.7 Y194.7 E0.01786
+G1 X195.3 Y194.7 E0.03571
+G1 X195.3 Y195.3 E0.05357
+G1 X194.7 Y195.3 E0.07143
+G0 F6000 X195.124 Y195.124
+;TYPE:SKIN
+G1 F600 X194.874 Y194.874 E0.07669
+;MESH:NONMESH
+G0 F300 X194.874 Y194.874 Z0.4
+G0 F6000 X194.7 Y195.3
+;TIME_ELAPSED:5.691740
+;LAYER:1
+M117 test 2/5
+M140 S50
+M106 S85
+;TYPE:WALL-OUTER
+;MESH:test.stl
+G1 F600 X194.7 Y194.7 E0.09455
+G1 X195.3 Y194.7 E0.1124
+G1 X195.3 Y195.3 E0.13026
+G1 X194.7 Y195.3 E0.14812
+G0 F7500 X194.915 Y195.124
+;TYPE:SKIN
+G1 F600 X195.123 Y194.916 E0.15249
+;MESH:NONMESH
+G0 F300 X195.123 Y194.916 Z0.6
+G0 F7500 X194.7 Y195.3
+;TIME_ELAPSED:6.140160
+;LAYER:2
+M117 test 3/5
+M106 S170
+;TYPE:WALL-OUTER
+;MESH:test.stl
+G1 F600 X194.7 Y194.7 E0.17035
+G1 X195.3 Y194.7 E0.18821
+G1 X195.3 Y195.3 E0.20607
+G1 X194.7 Y195.3 E0.22392
+G0 F9000 X195.124 Y195.124
+;TYPE:SKIN
+G1 F600 X194.874 Y194.874 E0.22918
+;MESH:NONMESH
+G0 F300 X194.874 Y194.874 Z0.8
+G0 F9000 X194.7 Y195.3
+;TIME_ELAPSED:6.600608
+;LAYER:3
+M117 test 4/5
+M106 S255
+;TYPE:WALL-OUTER
+;MESH:test.stl
+G1 F600 X194.7 Y194.7 E0.24704
+G1 X195.3 Y194.7 E0.2649
+G1 X195.3 Y195.3 E0.28275
+G1 X194.7 Y195.3 E0.30061
+G0 F9000 X194.915 Y195.124
+;TYPE:SKIN
+G1 F600 X195.123 Y194.916 E0.30499
+;MESH:NONMESH
+G0 F300 X195.123 Y194.916 Z1
+G0 F9000 X194.7 Y195.3
+;TIME_ELAPSED:7.049537
+;LAYER:4
+M117 test 5/5
+;TYPE:WALL-OUTER
+;MESH:test.stl
+G1 F600 X194.7 Y194.7 E0.32285
+G1 X195.3 Y194.7 E0.3407
+G1 X195.3 Y195.3 E0.35856
+G1 X194.7 Y195.3 E0.37642
+G0 F9000 X195.124 Y195.124
+;TYPE:SKIN
+G1 F600 X194.874 Y194.874 E0.38168
+;TIME_ELAPSED:7.397309
+G1 F2700 E-4.61832
+M140 S0
+M107
+G91 ;Relative positioning
+G1 E-2 F2700 ;Retract a bit
+G1 E-2 Z0.2 F2400 ;Retract and raise Z
+G1 X5 Y5 F3000 ;Wipe out
+G1 Z10 ;Raise Z more
+G90 ;Absolute positionning
+
+G1 X0 Y390 ;Present print
+M106 S0 ;Turn-off fan
+M104 S0 ;Turn-off hotend
+M140 S60 ;Set bed to pre-heat for next print
+
+M84 X Y E ;Disable all steppers but Z
+M82 ;absolute extrusion mode
+M104 S0
+;End of Gcode
+;SETTING_3 {"global_quality": "[general]\\nversion = 4\\nname = Standard Quality
+;SETTING_3  #2\\ndefinition = creality_cr10s4\\n\\n[metadata]\\ntype = quality_c
+;SETTING_3 hanges\\nquality_type = standard\\n\\n[values]\\nadhesion_type = none
+;SETTING_3 \\n\\n", "extruder_quality": ["[general]\\nversion = 4\\nname = Stand
+;SETTING_3 ard Quality #2\\ndefinition = creality_base\\n\\n[metadata]\\ntype = 
+;SETTING_3 quality_changes\\nposition = 0\\nquality_type = standard\\n\\n[values
+;SETTING_3 ]\\n\\n"]}
+
+--boundary_.oOo._bv097qc4gjXX2lIV1Abtaofbt8h3VFst
+Content-Disposition: form-data; name="print"
+Content-Type: text/plain
+
+true
+--boundary_.oOo._bv097qc4gjXX2lIV1Abtaofbt8h3VFst--
