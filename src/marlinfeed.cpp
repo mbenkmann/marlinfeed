@@ -122,6 +122,11 @@ const int MAX_TIME_WITH_ERROR = 5000;
 // blocking command that is silent (e.g. G28).
 const int MAX_TIME_SILENCE = 120000;
 
+// If this number of milliseconds pass with a gcode ready to be sent to the printer
+// but no ok received to free up space in the buffer, the printer state will change to
+// Stalled. This indicates a long running command like G28.
+const int STALL_TIME = 2000;
+
 bool ioerror_next;
 int verbosity = 0;
 
@@ -331,7 +336,7 @@ int main(int argc, char* argv[])
     // GCC supports C99 VLAs for C++ with proper constructor calls.
     option::Option options[stats.options_max], buffer[stats.buffer_max];
 
-    option::Parser parse(usage, argc, argv, options, buffer);
+    option::Parser parse(true, usage, argc, argv, options, buffer);
 
     if (parse.error())
         return 1;
@@ -721,7 +726,7 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
     }
 
     printerState = PrinterState::Printing;
-    int stall_counter = 0;
+    int64_t last_ok_time = 0;
     bool have_time = false; // if we have extracted an estimated print time from slicer comments
     int resend_count = 0;
     int64_t last_error = 0;
@@ -752,7 +757,7 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
                 {
                     if (verbosity > 2)
                         stdoutbuf.put(input); // echo to stdout
-                    stall_counter = 0;
+                    last_ok_time = millis();
                     if (ignore_ok)
                         ignore_ok = false;
                     else
@@ -831,7 +836,6 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
                     }
                     else
                     {
-                        ++stall_counter;
                         break;
                     }
                 }
@@ -849,7 +853,8 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
                 serial.writeAll(gcode_to_send->data(), gcode_to_send->length());
             }
 
-            printerState = stall_counter > 2 ? PrinterState::Stalled : PrinterState::Printing;
+            printerState = (next_gcode != 0 && millis() - last_ok_time > STALL_TIME) ? PrinterState::Stalled
+                                                                                     : PrinterState::Printing;
         } // while(action_on_printer)
 
         // Accept as socket connection if any is pending, then fork
