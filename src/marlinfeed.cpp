@@ -175,7 +175,7 @@ class PrinterState
         startTime = 0;
         endTime = 0;
         free((void*)printName);
-        printName = strdup("Unnamed");
+        printName = strdup("None");
         printSize = 0;
         printedBytes = 0;
     }
@@ -222,9 +222,9 @@ class PrinterState
             deltat = (millis() - startTime);
         double completion = 0;
         if (startTime > 0 && endTime > startTime)
-            completion = deltat / (endTime - startTime);
+            completion = 100.0 * deltat / (endTime - startTime);
         else if (printSize > 0)
-            completion = (double)printedBytes / (double)printSize;
+            completion = 100.0 * (double)printedBytes / (double)printSize;
         deltat /= 1000; // convert to seconds
 
         int len = asprintf(&j,
@@ -237,6 +237,7 @@ class PrinterState
                            "  },\r\n"
                            "  \"progress\": {\r\n"
                            "      \"printTime\": %f,\r\n"
+                           "      \"printTimeLeft\": null,\r\n"
                            "      \"completion\": %f\r\n"
                            "  }\r\n"
                            "}\r\n",
