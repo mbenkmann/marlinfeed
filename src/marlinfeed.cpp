@@ -80,7 +80,9 @@ const option::Descriptor usage[] = {
      "\n\n"
      "Options:"},
     {HELP, 0, "", "help", Arg::None, "  \t--help  \tPrint usage and exit."},
-    {VERBOSE, 0, "v", "verbose", Arg::None, "  -v, \t--verbose  \tIncrease verbosity. Can be used multiple times."},
+    {VERBOSE, 0, "v", "verbose", Arg::None,
+     "  -v, \t--verbose  \tIncrease verbosity. Can be used multiple times. At level 4+ erroneous requests will be "
+     "written to /tmp."},
     {API, 0, "", "api", Arg::Required,
      " \t--api=<base-url>  \tListen for incoming connections with an Octoprint compatible API that clients will access "
      "as <base-url>/api . If --port is not specified and <base-url> contains a port, the latter port will be the port "
@@ -937,6 +939,9 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
     }
 }
 
+void* raw;
+int rawsize;
+
 const char* HTTP_HEADERS = "HTTP/1.1 %d %s\r\n"
                            "%sCache-Control: no-store\r\n"
                            "Content-Length: %d\r\n"
@@ -1001,6 +1006,12 @@ int wait_empty_line(gcode::Reader& client_reader)
             break;
         if (verbosity > 1)
             out.writeAll(line->data(), line->length());
+        if (verbosity > 3)
+        {
+            raw = realloc(raw, rawsize + line->length());
+            memcpy((char*)raw + rawsize, line->data(), line->length());
+            rawsize += line->length();
+        }
         if (line->data()[0] == '\n' || (line->data()[0] == '\r' && line->data()[1] == '\n'))
             break;
         int idx;
@@ -1020,7 +1031,21 @@ void http_error(File& client, gcode::Reader& client_reader, HTTPCode code)
     if (len < 65536)
     {
         char buffy[len];
-        client.read(buffy, len, 1000);
+        len = client.read(buffy, len, 1000);
+        if (len > 0 && verbosity > 3)
+        {
+            raw = realloc(raw, rawsize + len);
+            memcpy((char*)raw + rawsize, buffy, len);
+            rawsize += len;
+            const char* fname = File::createFile("/tmp/raw-request-????", 0600);
+            if (fname)
+            {
+                File f(fname);
+                f.open(O_WRONLY);
+                f.writeAll(raw, rawsize);
+                f.close();
+            }
+        }
     }
 
     const char* content = "<!DOCTYPE html><html><head><title>Error</title></head><body><h1>Error</h1></body></html>";
@@ -1337,6 +1362,12 @@ void handle_socket_connection(int fd)
 
     if (verbosity > 0)
         out.writeAll(request->data(), request->length());
+
+    if (verbosity > 3)
+    {
+        raw = strdup(request->data());
+        rawsize = request->length();
+    }
 
     int idx;
     if (0 < (idx = (request->startsWith("get\b") + request->startsWith("GET\b"))))
