@@ -229,6 +229,12 @@ class PrinterState
             completion = 100.0 * (double)printedBytes / (double)printSize;
         deltat /= 1000; // convert to seconds
 
+        const char* nameOnly = strrchr(printName, '/');
+        if (nameOnly == 0)
+            nameOnly = printName;
+        else
+            nameOnly++; // skip the '/'
+
         int len = asprintf(&j,
                            "{\r\n"
                            "  \"state\": \"%s\",\r\n"
@@ -243,7 +249,7 @@ class PrinterState
                            "      \"completion\": %f\r\n"
                            "  }\r\n"
                            "}\r\n",
-                           text, printName, deltat, completion);
+                           text, nameOnly, deltat, completion);
         if (len <= 0)
             return "{}";
         return j;
