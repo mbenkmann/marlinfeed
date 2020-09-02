@@ -101,11 +101,11 @@ const option::Descriptor usage[] = {
      "  marlinfeed gcode/init.gcode gcode/benchy.gcode /dev/ttyUSB0 \n"
      "  marlinfeed --ioerror=next 1stprint.gcode 2ndprint.gcode /dev/ttyUSB0 \n"
      "  marlinfeed ./upload /dev/ttyUSB0 \n"
-     "  marlinfeed --ioerror=quit http://my-printer:80 upload /dev/ttyUSB0 \n"
+     "  marlinfeed --ioerror=quit --api=http://my-printer:80 upload /dev/ttyUSB0 \n"
      "      listens for connections on port 80.\n\n"
-     "  marlinfeed --localhost https://my-printer /dev/ttyUSB0 \n"
+     "  marlinfeed --localhost --api=https://my-printer /dev/ttyUSB0 \n"
      "      listens for localhost connections on port 8080. Needs some form of proxy to implement TLS.\n\n"
-     "  marlinfeed -p 6000 https://my-printer:443/ /var/cache/marlinfeed /dev/ttyUSB0 \n"
+     "  marlinfeed -p 6000 --api=https://my-printer:443/ /var/cache/marlinfeed /dev/ttyUSB0 \n"
      "      listens for connections on port 6000. Needs some form of proxy.\n"
      "\n"},
     {0, 0, 0, 0, 0, 0}};
