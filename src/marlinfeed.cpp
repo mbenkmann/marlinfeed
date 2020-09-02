@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <utime.h>
 
 #include "arg.h"
 
@@ -945,10 +946,11 @@ enum HTTPCode
 {
     OK = 0,
     NotFound = 1,
-    Created = 2
+    Created = 2,
+    NoContent = 3
 };
-int HTTPCodeNum[] = {200, 404, 201};
-const char* HTTPCodeDesc[] = {"OK", "Not Found", "Created"};
+int HTTPCodeNum[] = {200, 404, 201, 204};
+const char* HTTPCodeDesc[] = {"OK", "Not Found", "Created", "No Content"};
 
 const char* VERSION_JSON = "{\r\n"
                            "  \"api\": \"0.1\",\r\n"
@@ -1200,7 +1202,7 @@ void upload(File& client, gcode::Reader& client_reader)
         }
 
         const char* location;
-        if (0 >= asprintf((char**)&location, "Location: %s/api/local/%s\r\n", api_base_url, finished_fname))
+        if (0 >= asprintf((char**)&location, "Location: %s/api/files/local/%s\r\n", api_base_url, finished_fname))
             location = "";
         char* reply;
         int len = asprintf(&reply, HTTP_HEADERS, HTTPCodeNum[Created], HTTPCodeDesc[Created], location,
@@ -1213,6 +1215,67 @@ void upload(File& client, gcode::Reader& client_reader)
             if (verbosity > 1)
                 out.writeAll(reply, len);
         }
+    }
+    _exit(1);
+}
+
+void touch_file(gcode::Line& request, File& client, gcode::Reader& client_reader)
+{
+    int contentlength = wait_empty_line(client_reader);
+    if (contentlength > 0 && contentlength < 65536)
+    {
+        char buf[contentlength];
+        contentlength = client.read(buf, sizeof(buf), 200, 2000);
+
+        if (contentlength > 0)
+        {
+            request.slice(strlen("files/local/"));
+            const char* space = strchr(request.data(), ' ');
+            if (space)
+            {
+                int len = space - request.data();
+                request.slice(0, len);
+
+                if (0 != strstr(buf, "\"print\""))
+                {
+                    char* finished_fname = strdup(request.data());
+                    for (unsigned char* p = (unsigned char*)finished_fname; *p != 0; p++)
+                        if (!(*p > 127 || isalnum(*p) || *p == '_' || *p == '-' || *p == '+' || *p == '.' || *p == ','))
+                            *p = '_';
+
+                    char* fpath;
+                    if (0 < asprintf(&fpath, "%s/%s", upload_dir, finished_fname))
+                    {
+                        File f(fpath);
+                        struct stat statbuf;
+                        if (f.stat(&statbuf) && S_ISREG(statbuf.st_mode))
+                        {
+                            utime(fpath, 0);
+                            char* reply;
+                            len = asprintf(&reply, HTTP_HEADERS, HTTPCodeNum[NoContent], HTTPCodeDesc[NoContent], "", 0,
+                                           "text/html", "");
+                            if (len > 0)
+                            {
+                                client.writeAll(reply, len);
+                                if (verbosity > 1)
+                                    out.writeAll(reply, len);
+                            }
+                            _exit(1);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    const char* content = "<!DOCTYPE html><html><head><title>Error</title></head><body><h1>Error</h1></body></html>";
+    char* reply;
+    int len = asprintf(&reply, HTTP_HEADERS, HTTPCodeNum[NotFound], HTTPCodeDesc[NotFound], "", strlen(content),
+                       "text/html", content);
+    if (len > 0)
+    {
+        client.writeAll(reply, len);
+        out.writeAll(reply, len);
     }
     _exit(1);
 }
@@ -1286,11 +1349,11 @@ void handle_socket_connection(int fd)
             request->slice(5);
             if (request->startsWith("version\b"))
                 http_json(VERSION_JSON, client, client_reader, OK);
-            if (request->startsWith("settings\b"))
+            else if (request->startsWith("settings\b"))
                 http_json(SETTINGS_JSON, client, client_reader, OK);
-            if (request->startsWith("printer\b"))
+            else if (request->startsWith("printer\b"))
                 http_json(printerState.toJSON(), client, client_reader, OK);
-            if (request->startsWith("job\b"))
+            else if (request->startsWith("job\b"))
                 http_json(printerState.jobJSON(), client, client_reader, OK);
         }
     }
@@ -1302,7 +1365,9 @@ void handle_socket_connection(int fd)
             request->slice(5);
             if (request->startsWith("login\b"))
                 http_json(login_json(), client, client_reader, OK);
-            if (request->startsWith("files/local\b"))
+            else if (request->startsWith("files/local/"))
+                touch_file(*request, client, client_reader);
+            else if (request->startsWith("files/local\b"))
                 upload(client, client_reader);
         }
     }
