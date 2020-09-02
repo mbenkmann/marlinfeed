@@ -331,7 +331,7 @@ int main(int argc, char* argv[])
 
     argc -= (argc > 0);
     argv += (argc > 0); // skip program name argv[0] if present
-    option::Stats stats(usage, argc, argv);
+    option::Stats stats(true, usage, argc, argv);
 
     // GCC supports C99 VLAs for C++ with proper constructor calls.
     option::Option options[stats.options_max], buffer[stats.buffer_max];
