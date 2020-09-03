@@ -7,6 +7,7 @@ Set GPIO pin 2 to LOW
 Watch GPIO pin 4 and on a POSITIVE EDGE, treat it as if marlinfeed had received SIGHUP
 Watch GPIO pin 6 and on a NEGATIVE EDGE, treat it as if marlinfeed had received SIGUSR1
 
+SIGUSR1: pause current print or resume if currently paused
 SIGHUP: abort current print, continue with next infile even if ioerror==quit.
 SIGINT: like SIGTERM
 SIGQUIT: wait for the end of the current print, cool down printer, call /sbin/poweroff

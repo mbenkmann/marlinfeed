@@ -132,10 +132,23 @@ const int STALL_TIME = 2000;
 
 bool ioerror_next;
 int verbosity = 0;
+volatile sig_atomic_t interrupt = 0;
 
 bool handle(File& out, File& serial, const char* infile, File* sock, const char** e, int* iop);
 void handle_socket_connection(int fd);
 void socketTest();
+
+void signal_handler(int signum, siginfo_t*, void*)
+{
+    switch (signum)
+    {
+        case SIGUSR1:
+            interrupt ^= 1;
+            break;
+    }
+}
+
+bool isPaused() { return (interrupt & 1) != 0; }
 
 // FIFO::filter() for removing file names with no known GCODE extension
 struct GCodeExtension
@@ -167,6 +180,8 @@ class PrinterState
     float bed[2];
     int64_t startTime;
     int64_t endTime;
+    int64_t pauseStartTime;
+    int64_t pauseTime;
     const char* printName;
     int64_t printSize;
     int64_t printedBytes;
@@ -176,6 +191,8 @@ class PrinterState
     {
         startTime = 0;
         endTime = 0;
+        pauseTime = 0;
+        pauseStartTime = 0;
         free((void*)printName);
         printName = strdup("None");
         printSize = 0;
@@ -187,15 +204,23 @@ class PrinterState
         Disconnected = 0, // Marlinfeed not currently sync'ed with printer
         Printing = 1,     // Commands are flowing from an infile to printer
         Idle = 2,         // Marlinfeed sync'ed with printer but no active infile
-        Stalled = 3       // Commands are waiting because printer buffer has been full for a while
+        Stalled = 3,      // Commands are waiting because printer buffer has been full for a while
+        Paused = 4        // Paused by user
     } status;
 
     void operator=(Enum s)
     {
-        if (s != Printing && s != Stalled)
+        if (s != Printing && s != Stalled && s != Paused)
             clearJob();
-        if (s == Printing && status != Printing && status != Stalled)
+        if (s == Printing && status != Printing && status != Stalled && status != Paused)
             startTime = millis();
+        if (s == Paused && status != Paused)
+            pauseStartTime = millis();
+        if (status == Paused && s != Paused)
+        {
+            pauseTime += millis() - pauseStartTime;
+            pauseStartTime = 0;
+        }
         status = s;
     }
 
@@ -219,9 +244,18 @@ class PrinterState
         const char* text = "Operational";
         if (status == Printing || status == Stalled)
             text = "Printing";
+        else if (status == Paused)
+            text = "Paused";
         double deltat = 0;
         if (startTime > 0)
-            deltat = (millis() - startTime);
+        {
+            if (pauseStartTime > 0)
+                deltat = pauseStartTime - startTime;
+            else
+                deltat = millis() - startTime;
+
+            deltat -= pauseTime;
+        }
         double completion = 0;
         if (startTime > 0 && endTime > startTime)
             completion = 100.0 * deltat / (endTime - startTime);
@@ -261,10 +295,12 @@ class PrinterState
         const char* text = "Operational";
         if (status == Printing)
             text = "Printing";
-        if (status == Stalled)
+        else if (status == Stalled)
             text = "Stalled";
+        else if (status == Paused)
+            text = "Paused";
         const char* operational = boolStr(true);
-        const char* paused = boolStr(false);
+        const char* paused = boolStr(status == Paused);
         const char* printing = boolStr(status == Printing || status == Stalled);
         const char* cancelling = boolStr(false);
         const char* pausing = boolStr(false);
@@ -336,10 +372,21 @@ const char* upload_dir = 0;
 int cmd_inject[2]; // socketpair, cmd_inject[0] is the write end for child processes
 gcode::Reader* inject_in;
 
+pid_t MainProcess = getpid();
+
 int main(int argc, char* argv[])
 {
     signal(SIGCHLD, SIG_IGN); // automatic zombie removal
     signal(SIGPIPE, SIG_IGN); // handle as EPIPE on write()
+    struct sigaction sigact;
+    sigact.sa_sigaction = signal_handler;
+    sigact.sa_flags = SA_SIGINFO;
+    sigfillset(&sigact.sa_mask);
+    assert(0 == sigaction(SIGUSR1, &sigact, 0));
+    /*assert(0 == sigaction(SIGHUP, &sigact, 0));
+    assert(0 == sigaction(SIGINT, &sigact, 0));
+    assert(0 == sigaction(SIGTERM, &sigact, 0));
+    assert(0 == sigaction(SIGQUIT, &sigact, 0));*/
 
     argc -= (argc > 0);
     argv += (argc > 0); // skip program name argv[0] if present
@@ -581,9 +628,12 @@ bool handle_error(const char** e, const char* err_msg, int* iop, int which)
 
 bool handle(File& out, File& serial, const char* infile, File* sock, const char** e, int* iop)
 {
-    out.writeAll("\n>>> ", 5);
-    out.writeAll(infile, strlen(infile));
-    out.writeAll("\n", 1);
+    if (verbosity > 0)
+    {
+        out.writeAll("\n>>> ", 5);
+        out.writeAll(infile, strlen(infile));
+        out.writeAll("\n", 1);
+    }
 
     // (Re-)connect to printer if necessary.
     bool hard_reconnect = (serial.isClosed() || serial.EndOfFile() || serial.hasError());
@@ -730,16 +780,17 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
     MarlinBuf marlinbuf;
     int idx;
 
-    int nfds = 4;
-    pollfd fds[5];
+    // We intentionally don't include the infile file descriptor in the list
+    // we poll because that one will almost always be ready as it's a file on
+    // the local storage.
+    int nfds = 3;
+    pollfd fds[4];
     fds[0].fd = serial.fileDescriptor();
     fds[0].events = POLLIN | POLLOUT;
     fds[1].fd = out.fileDescriptor();
     fds[1].events = POLLIN | POLLOUT;
-    fds[2].fd = in->fileDescriptor();
+    fds[2].fd = cmd_inject[1];
     fds[2].events = POLLIN | POLLOUT;
-    fds[3].fd = cmd_inject[1];
-    fds[3].events = POLLIN | POLLOUT;
     if (sock != 0)
     {
         fds[nfds].fd = sock->fileDescriptor();
@@ -758,6 +809,10 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
     {
         // Save CPU cycles by doing a poll() on the involved file descriptors
         poll(fds, nfds, 1000);
+
+        // If we're paused, save CPU cycles by sleeping a bit
+        if (isPaused())
+            usleep(10000);
 
         /*
           Handle all action on the serial interface before doing other stuff.
@@ -849,7 +904,7 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
                         printerState.setPrintedBytes(gcode_in.totalBytesRead());
                 }
 
-                if (next_gcode != 0)
+                if (next_gcode != 0 && !isPaused())
                 {
                     if (next_gcode->length() <= marlinbuf.maxAppendLen())
                     {
@@ -877,8 +932,11 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
                 serial.writeAll(gcode_to_send->data(), gcode_to_send->length());
             }
 
-            printerState = (next_gcode != 0 && millis() - last_ok_time > STALL_TIME) ? PrinterState::Stalled
-                                                                                     : PrinterState::Printing;
+            if (isPaused())
+                printerState = PrinterState::Paused;
+            else
+                printerState = (next_gcode != 0 && millis() - last_ok_time > STALL_TIME) ? PrinterState::Stalled
+                                                                                         : PrinterState::Printing;
         } // while(action_on_printer)
 
         // Accept as socket connection if any is pending, then fork
@@ -1045,7 +1103,7 @@ int wait_empty_line(gcode::Reader& client_reader)
     return contentlength;
 }
 
-void http_error(File& client, gcode::Reader& client_reader, HTTPCode code)
+void http_error(const char* message, int echo_verbosity, File& client, gcode::Reader& client_reader, HTTPCode code)
 {
     int len = wait_empty_line(client_reader);
     if (len < 65536)
@@ -1070,14 +1128,20 @@ void http_error(File& client, gcode::Reader& client_reader, HTTPCode code)
         }
     }
 
-    const char* content = "<!DOCTYPE html><html><head><title>Error</title></head><body><h1>Error</h1></body></html>";
     char* reply;
-    len = asprintf(&reply, HTTP_HEADERS, HTTPCodeNum[code], HTTPCodeDesc[code], "", strlen(content), "text/html",
-                   content);
+    char* content;
+    len = asprintf(
+        &content,
+        "<!DOCTYPE html><html><head><title>Error</title></head><body><h1>Unsupported Request: %s</h1></body></html>",
+        message);
+    if (len > 0)
+        len = asprintf(&reply, HTTP_HEADERS, HTTPCodeNum[code], HTTPCodeDesc[code], "", strlen(content), "text/html",
+                       content);
     if (len > 0)
     {
         client.writeAll(reply, len);
-        out.writeAll(reply, len);
+        if (verbosity >= echo_verbosity)
+            out.writeAll(reply, len);
     }
     _exit(1);
 }
@@ -1408,6 +1472,80 @@ void inject(File& client, gcode::Reader& client_reader)
     _exit(1);
 }
 
+void job_command(File& client, gcode::Reader& client_reader)
+{
+    client_reader.whitespaceCompression(0); // preserve whitespace
+    client_reader.commentChar('\n');        // do not handle comments
+    int contentlength = wait_empty_line(client_reader);
+
+    char buf[contentlength + 1];
+    int i = client_reader.raw(buf, contentlength);
+    contentlength = client.read(buf + i, contentlength - i, 200, 2000);
+
+    int command = 0;
+    int action = 0;
+
+    if (contentlength >= 0)
+    {
+        contentlength += i;
+        buf[contentlength] = 0;
+
+        gcode::Line line(buf);
+
+        char* cmd = line.getString("\"command\"");
+        if (cmd)
+        {
+            if (strcmp(cmd, "pause") == 0)
+                command = 1;
+            else if (strcmp(cmd, "cancel") == 0)
+                command = 2;
+            free(cmd);
+        }
+
+        char* act = line.getString("\"action\"");
+        if (act)
+        {
+            if (strcmp(act, "pause") == 0)
+                action = 1;
+            else if (strcmp(act, "resume") == 0)
+                action = 2;
+            free(act);
+        }
+    }
+
+    if (command > 0)
+    {
+        if (command == 1)
+        {                    // pause
+            if (action == 0) // toggle
+                kill(MainProcess, SIGUSR1);
+        }
+
+        char* reply;
+        int len =
+            asprintf(&reply, HTTP_HEADERS, HTTPCodeNum[NoContent], HTTPCodeDesc[NoContent], "", 0, "text/html", "");
+        if (len > 0)
+        {
+            client.writeAll(reply, len);
+            if (verbosity > 1)
+                out.writeAll(reply, len);
+        }
+        _exit(0);
+    }
+
+    const char* content =
+        "<!DOCTYPE html><html><head><title>Error</title></head><body><h1>Unsupported Job Action</h1></body></html>";
+    char* reply;
+    int len = asprintf(&reply, HTTP_HEADERS, HTTPCodeNum[NotFound], HTTPCodeDesc[NotFound], "", strlen(content),
+                       "text/html", content);
+    if (len > 0)
+    {
+        client.writeAll(reply, len);
+        out.writeAll(reply, len);
+    }
+    _exit(1);
+}
+
 void handle_socket_connection(int fd)
 {
     // union {
@@ -1476,7 +1614,7 @@ void handle_socket_connection(int fd)
     {
         request->slice(idx);
         if (request->startsWith("/plugin/appkeys/probe\b"))
-            http_error(client, client_reader, NotFound);
+            http_error("/plugin/appkeys/probe", 2, client, client_reader, NotFound);
 
         if (request->startsWith("/api/"))
         {
@@ -1489,6 +1627,8 @@ void handle_socket_connection(int fd)
                 http_json(printerState.toJSON(), client, client_reader, OK);
             else if (request->startsWith("job\b"))
                 http_json(printerState.jobJSON(), client, client_reader, OK);
+            else if (request->startsWith("printerprofiles\b"))
+                http_error("/api/printerprofiles", 2, client, client_reader, NotFound);
         }
     }
     else if (0 < (idx = (request->startsWith("post\b") + request->startsWith("POST\b"))))
@@ -1499,6 +1639,8 @@ void handle_socket_connection(int fd)
             request->slice(5);
             if (request->startsWith("login\b"))
                 http_json(login_json(), client, client_reader, OK);
+            else if (request->startsWith("job\b"))
+                job_command(client, client_reader);
             else if (request->startsWith("files/local/"))
                 touch_file(*request, client, client_reader);
             else if (request->startsWith("files/local\b"))
@@ -1508,7 +1650,7 @@ void handle_socket_connection(int fd)
         }
     }
 
-    http_error(client, client_reader, NotFound);
+    http_error(request->data(), 0, client, client_reader, NotFound);
 }
 
 void socketTest()
