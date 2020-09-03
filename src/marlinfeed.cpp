@@ -333,6 +333,8 @@ File out("stdout", 1);
 
 const char* api_base_url = 0;
 const char* upload_dir = 0;
+int cmd_inject[2]; // socketpair, cmd_inject[0] is the write end for child processes
+gcode::Reader* inject_in;
 
 int main(int argc, char* argv[])
 {
@@ -363,6 +365,12 @@ int main(int argc, char* argv[])
         fprintf(stderr, "%s\n", "You must provide a path to your printer device!");
         exit(1);
     }
+
+    assert(0 == socketpair(AF_UNIX, SOCK_SEQPACKET, 0, cmd_inject));
+    File inject("Command Injector", cmd_inject[1]);
+    inject.setNonBlock(true);
+    inject_in = new gcode::Reader(inject);
+    inject_in->whitespaceCompression(1);
 
     verbosity = options[VERBOSE].count();
 
@@ -486,7 +494,7 @@ int main(int argc, char* argv[])
 
     printerState = PrinterState::Disconnected;
 
-    if (strcmp(api_base_url, "Debug") == 0)
+    if (api_base_url != 0 && strcmp(api_base_url, "Debug") == 0)
         socketTest();
 
     for (;;)
@@ -500,7 +508,7 @@ int main(int argc, char* argv[])
         {
             if (sock)
             {
-                sock->poll(POLLIN, 1000);
+                sock->poll(POLLIN, 250);
                 // Accept as socket connection if any is pending, then fork
                 // and handle it in a child process.
                 int connfd = sock->accept();
@@ -525,12 +533,12 @@ int main(int argc, char* argv[])
                         sock->clearError();
                 }
             }
-            else
-                sleep(1); // to make sure we don't burn cycles waiting for files
+            else if (!inject_in->hasNext())
+                usleep(250000); // to make sure we don't burn cycles waiting for files
 
             dirScanner.refill(infile_queue);
             infile_queue.filter(gcode_extension);
-            if (infile_queue.empty())
+            if (infile_queue.empty() && !inject_in->hasNext())
                 continue;
         }
 
@@ -541,6 +549,8 @@ int main(int argc, char* argv[])
                                  // 3: error occurred on printer device, try reconnecting
 
         char* infile = infile_queue.get();
+        if (infile == 0) // can only happen if we have something in inject_in
+            infile = strdup("/dev/null");
 
         if (!handle(out, serial, infile, sock, &error, &in_out_printer))
         {
@@ -720,14 +730,16 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
     MarlinBuf marlinbuf;
     int idx;
 
-    int nfds = 3;
-    pollfd fds[4];
+    int nfds = 4;
+    pollfd fds[5];
     fds[0].fd = serial.fileDescriptor();
     fds[0].events = POLLIN | POLLOUT;
     fds[1].fd = out.fileDescriptor();
     fds[1].events = POLLIN | POLLOUT;
     fds[2].fd = in->fileDescriptor();
     fds[2].events = POLLIN | POLLOUT;
+    fds[3].fd = cmd_inject[1];
+    fds[3].events = POLLIN | POLLOUT;
     if (sock != 0)
     {
         fds[nfds].fd = sock->fileDescriptor();
@@ -823,6 +835,8 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
             {
                 if (next_gcode == 0)
                     next_gcode = gcode_in.next(); // may still be null if no data available
+                if (next_gcode == 0)
+                    next_gcode = inject_in->next(); // may still be null if no data available
 
                 if (!have_time)
                 {
@@ -1037,9 +1051,11 @@ void http_error(File& client, gcode::Reader& client_reader, HTTPCode code)
     if (len < 65536)
     {
         char buffy[len];
-        len = client.read(buffy, len, 1000);
-        if (len > 0 && verbosity > 3)
+        int i = client_reader.raw(buffy, len);
+        len = client.read(buffy + i, len - i, 1000);
+        if (len >= 0 && verbosity > 3)
         {
+            len += i;
             raw = realloc(raw, rawsize + len);
             memcpy((char*)raw + rawsize, buffy, len);
             rawsize += len;
@@ -1078,7 +1094,8 @@ void http_json(const char* json, File& client, gcode::Reader& client_reader, HTT
                const char* extra_headers = "")
 {
     int len = wait_empty_line(client_reader);
-    if (len < 65536)
+    len -= client_reader.discard();
+    if (len > 0 && len < 65536)
     {
         char buffy[len];
         client.read(buffy, len, 1000);
@@ -1256,11 +1273,14 @@ void touch_file(gcode::Line& request, File& client, gcode::Reader& client_reader
     int contentlength = wait_empty_line(client_reader);
     if (contentlength > 0 && contentlength < 65536)
     {
-        char buf[contentlength];
-        contentlength = client.read(buf, sizeof(buf), 200, 2000);
+        char buf[contentlength + 1];
+        int i = client_reader.raw(buf, contentlength);
+        contentlength = client.read(buf + i, contentlength - i, 200, 2000);
 
-        if (contentlength > 0)
+        if (contentlength >= 0)
         {
+            contentlength += i;
+            buf[contentlength] = 0;
             request.slice(strlen("files/local/"));
             const char* space = strchr(request.data(), ' ');
             if (space)
@@ -1292,7 +1312,7 @@ void touch_file(gcode::Line& request, File& client, gcode::Reader& client_reader
                                 if (verbosity > 1)
                                     out.writeAll(reply, len);
                             }
-                            _exit(1);
+                            _exit(0);
                         }
                     }
                 }
@@ -1300,7 +1320,83 @@ void touch_file(gcode::Line& request, File& client, gcode::Reader& client_reader
         }
     }
 
-    const char* content = "<!DOCTYPE html><html><head><title>Error</title></head><body><h1>Error</h1></body></html>";
+    const char* content =
+        "<!DOCTYPE html><html><head><title>Error</title></head><body><h1>Touch Error</h1></body></html>";
+    char* reply;
+    int len = asprintf(&reply, HTTP_HEADERS, HTTPCodeNum[NotFound], HTTPCodeDesc[NotFound], "", strlen(content),
+                       "text/html", content);
+    if (len > 0)
+    {
+        client.writeAll(reply, len);
+        out.writeAll(reply, len);
+    }
+    _exit(1);
+}
+
+void inject(File& client, gcode::Reader& client_reader)
+{
+    int contentlength = wait_empty_line(client_reader);
+    if (contentlength > 0 && contentlength < 65536)
+    {
+        char buf[contentlength + 1];
+        int i = client_reader.raw(buf, contentlength);
+        contentlength = client.read(buf + i, contentlength - i, 200, 2000);
+
+        if (contentlength >= 0)
+        {
+            contentlength += i;
+            buf[contentlength] = 0;
+
+            char* commands = strstr(buf, "\"commands\"");
+            if (commands)
+                commands = strchr(commands, '[');
+            if (commands)
+            {
+                File injector("Command Injector", cmd_inject[0]);
+                char* cmd = 0;
+                commands++;
+                char* p = commands;
+                for (; *p != ']' && *p != 0; p++)
+                {
+                    if (*p == '"')
+                    {
+                        if (cmd == 0)
+                            cmd = p + 1;
+                        else
+                            cmd = 0;
+                        *p = '\n';
+                    }
+                    else if (*p == ',')
+                        *p = ' ';
+                }
+
+                if (*p == ']')
+                {
+                    if (verbosity > 1)
+                    {
+                        *p = 0;
+                        fprintf(stdout, "Injecting \"%s\"\n", commands);
+                    }
+                    *p = '\n';
+                    injector.writeAll(commands, p + 1 - commands);
+
+                    char* reply;
+                    int len = asprintf(&reply, HTTP_HEADERS, HTTPCodeNum[NoContent], HTTPCodeDesc[NoContent], "", 0,
+                                       "text/html", "");
+                    if (len > 0)
+                    {
+                        client.writeAll(reply, len);
+                        if (verbosity > 1)
+                            out.writeAll(reply, len);
+                    }
+                    _exit(0);
+                }
+            }
+        }
+    }
+
+    const char* content =
+        "<!DOCTYPE html><html><head><title>Error</title></head><body><h1>Inject Error</h1></body></html>";
     char* reply;
     int len = asprintf(&reply, HTTP_HEADERS, HTTPCodeNum[NotFound], HTTPCodeDesc[NotFound], "", strlen(content),
                        "text/html", content);
@@ -1407,6 +1503,8 @@ void handle_socket_connection(int fd)
                 touch_file(*request, client, client_reader);
             else if (request->startsWith("files/local\b"))
                 upload(client, client_reader);
+            else if (request->startsWith("printer/command\b"))
+                inject(client, client_reader);
         }
     }
 
