@@ -35,3 +35,7 @@ over 1s.
 Support for Unix Domain Sockets as infiles. That way one could easily make an interactive session
 via socat. If a UDS is infile, then data received from the printer as well as error messages
 need to be copied to the UDS, too.  
+
+
+Print a few megabytes via Marlinfeed at different verbosity levels (especially verbosity 0 and verbosity 4)
+and check if memory usage keeps increasing => Memory leak
