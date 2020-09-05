@@ -237,6 +237,81 @@ class PrinterState
             endTime = startTime + seconds * 1000;
     }
 
+    void parseTemperatureReport(const char* p)
+    {
+        /*  Temperature report format:
+        M190
+        T:25.91 E:0 B:48.1
+        ok
+        If waiting, ok is only returned when temp is reached
+
+        M105
+        ok T:25.9 /0.0 B:50.0 /50.0 T0:25.9 /0.0 @:0 B@:0
+           ^^^    ^^^^        ^^^^  ^^^^^^^^^^^
+        active hotend target      target  all hotends T0, T1,...
+        The @ and B@ stuff are a number specifying the current power applied to the heaters
+
+        M109 S104
+        T:100.0 E:0 W:?
+        ...
+        T:100.0 E:0 W:0
+        ok
+        */
+
+        float* component = 0;
+        int idx = 0;
+        while (*p != 0)
+        {
+            if (p[0] == 'T' && p[1] == ':')
+            {
+                p += 2;
+                component = &tool[0][0];
+                idx = 0;
+            }
+            else if (p[0] == 'T' && p[1] == '0' && p[2] == ':')
+            {
+                p += 3;
+                component = &tool[0][0];
+                idx = 0;
+            }
+            else if (p[0] == 'T' && p[1] == '1' && p[2] == ':')
+            {
+                p += 3;
+                component = &tool[1][0];
+                idx = 0;
+            }
+            else if (p[0] == 'B' && p[1] == ':')
+            {
+                p += 2;
+                component = &bed[0];
+                idx = 0;
+            }
+            else if (p[0] == '/')
+            {
+                idx = 1;
+                p++;
+            }
+            else
+            {
+                while (*p != 0 && *p != ':')
+                    p++;
+                if (p[0] != 0)
+                    p++;
+                component = 0;
+            }
+
+            char* endptr;
+            double d = strtod(p, &endptr);
+            p = endptr;
+
+            while (isspace(*p))
+                p++;
+
+            if (component != 0)
+                component[idx] = d;
+        }
+    }
+
     //"{\"job\":{\"file\":{\"name\":\"\"}},\"progress\":{\"printTime\":null,\"completion\":null}}"
     const char* jobJSON()
     {
@@ -841,12 +916,12 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
             {
                 last_lifesign = millis();
                 action_on_printer = true;
-                if (input->startsWith("ok\b"))
+            reparse:
+                if (0 != (idx = input->startsWith("ok\b")))
                 {
                     if (verbosity > 2)
-                        stdoutbuf.put(input); // echo to stdout
-                    else
-                        delete input;
+                        stdoutbuf.put(new gcode::Line("ok\n")); // echo to stdout
+
                     last_ok_time = millis();
                     if (ignore_ok)
                         ignore_ok = false;
@@ -856,8 +931,24 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
                         last_error = 0;
                         if (!marlinbuf.ack())
                             stdoutbuf.put( // Don't exit for this error. The user knows best.
-                                new gcode::Line("WARNING! Spurious 'ok'! Is a user manually controlling the printer?"));
+                                new gcode::Line(
+                                    "WARNING! Spurious 'ok'! Is a user manually controlling the printer?\n"));
                     }
+
+                    input->slice(idx);
+                    if (input->length() > 0)
+                        goto reparse; // in case something follows ok, such as an M105 temperature report
+                    else
+                        delete input;
+                }
+                else if (input->startsWith("T:"))
+                {
+                    printerState.parseTemperatureReport(input->data());
+
+                    if (verbosity > 1)
+                        stdoutbuf.put(input);
+                    else
+                        delete input;
                 }
                 else if (input->startsWith("Error:"))
                 {

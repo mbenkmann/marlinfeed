@@ -74,8 +74,10 @@ struct PrinterState
 {
     double X = 0, Y = 0, Z = 0;
     double F = 0;
-    double bed = 20;
-    double nozzle = 20;
+    double bed = 20.1;
+    double bed_target = 21.2;
+    double nozzle = 22.3;
+    double nozzle_target = 23.4;
     bool relative = false;
 } p;
 
@@ -256,6 +258,17 @@ void unknown_command_error(File& peer, const char* gcode)
     fprintf(stdout, "%s", sendbuf);
 }
 
+void report_temperatures(File& peer)
+{
+    char sendbuf[1024];
+    int len = snprintf(sendbuf, sizeof(sendbuf), "ok T:%.1f /%.1f B:%.1f /%.1f T0:%.1f /%.1f @:0 B@:0\n", p.nozzle,
+                       p.nozzle_target, p.bed, p.bed_target, p.nozzle, p.nozzle_target);
+    if (len >= (int)sizeof(sendbuf))
+        len = sizeof(sendbuf) - 1; // -1 because of 0 terminator
+    peer.writeAll(sendbuf, len);
+    fprintf(stdout, "%s", sendbuf);
+}
+
 void plan_move(double x0, double y0, double z0, double feed)
 {
     if (feed < 60) // don't allow less than 1mm/s
@@ -371,6 +384,8 @@ void process_next_command(File& peer)
         case M + 104: // Set Hotend Temperature
             break;
         case M + 105: // Report Temperatures
+            cmd->send_ok = false;
+            report_temperatures(peer);
             break;
         case M + 106: // Set Fan Speed
             break;
