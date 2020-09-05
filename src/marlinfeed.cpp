@@ -780,24 +780,6 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
     MarlinBuf marlinbuf;
     int idx;
 
-    // We intentionally don't include the infile file descriptor in the list
-    // we poll because that one will almost always be ready as it's a file on
-    // the local storage.
-    int nfds = 3;
-    pollfd fds[4];
-    fds[0].fd = serial.fileDescriptor();
-    fds[0].events = POLLIN | POLLOUT;
-    fds[1].fd = out.fileDescriptor();
-    fds[1].events = POLLIN | POLLOUT;
-    fds[2].fd = cmd_inject[1];
-    fds[2].events = POLLIN | POLLOUT;
-    if (sock != 0)
-    {
-        fds[nfds].fd = sock->fileDescriptor();
-        fds[nfds].events = POLLIN | POLLOUT;
-        ++nfds;
-    }
-
     printerState = PrinterState::Printing;
     int64_t last_ok_time = 0;
     bool have_time = false; // if we have extracted an estimated print time from slicer comments
@@ -808,11 +790,39 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
     for (;;)
     {
         // Save CPU cycles by doing a poll() on the involved file descriptors
-        poll(fds, nfds, 1000);
+        {
+            pollfd fds[5];
+            int nfds = 0;
 
-        // If we're paused, save CPU cycles by sleeping a bit
-        if (isPaused())
-            usleep(10000);
+            fds[nfds].fd = serial.fileDescriptor();
+            fds[nfds].events = POLLIN; // always interested in what the printer has to say
+            if (marlinbuf.hasNext())
+                fds[nfds].events |= POLLOUT;
+
+            fds[++nfds].fd = cmd_inject[1]; // always interested in injections
+            fds[nfds].events = POLLIN;
+
+            if (!out.hasError() && !stdoutbuf.empty())
+            {
+                fds[++nfds].fd = out.fileDescriptor();
+                fds[nfds].events = POLLOUT;
+            }
+
+            if (next_gcode == 0 && !isPaused())
+            {
+                fds[++nfds].fd = in->fileDescriptor();
+                fds[nfds].events = POLLIN;
+            }
+
+            if (sock != 0)
+            {
+                fds[++nfds].fd = sock->fileDescriptor();
+                fds[nfds].events = POLLIN;
+            }
+
+            ++nfds;
+            poll(fds, nfds, -1);
+        }
 
         /*
           Handle all action on the serial interface before doing other stuff.
@@ -824,6 +834,7 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
             action_on_printer = false;
 
             serial.action("reading printer response");
+            serial.setNonBlock(true);
             gcode::Line* input;
             bool ignore_ok = false;
             while (0 != (input = gcode_serial.next()))
@@ -834,6 +845,8 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
                 {
                     if (verbosity > 2)
                         stdoutbuf.put(input); // echo to stdout
+                    else
+                        delete input;
                     last_ok_time = millis();
                     if (ignore_ok)
                         ignore_ok = false;
@@ -889,9 +902,9 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
             for (;;)
             {
                 if (next_gcode == 0)
-                    next_gcode = gcode_in.next(); // may still be null if no data available
-                if (next_gcode == 0)
                     next_gcode = inject_in->next(); // may still be null if no data available
+                if (next_gcode == 0 && !isPaused())
+                    next_gcode = gcode_in.next(); // may still be null if no data available
 
                 if (!have_time)
                 {
@@ -904,7 +917,7 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
                         printerState.setPrintedBytes(gcode_in.totalBytesRead());
                 }
 
-                if (next_gcode != 0 && !isPaused())
+                if (next_gcode != 0)
                 {
                     if (next_gcode->length() <= marlinbuf.maxAppendLen())
                     {
@@ -923,13 +936,16 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
             }
 
             serial.action("sending gcode to printer");
+            serial.setNonBlock(false);
             while (marlinbuf.hasNext() && !serial.hasError())
             {
                 action_on_printer = true;
                 gcode::Line* gcode_to_send = new gcode::Line(marlinbuf.next());
+                serial.writeAll(gcode_to_send->data(), gcode_to_send->length());
                 if (verbosity > 2)
                     stdoutbuf.put(gcode_to_send); // echo to stdout
-                serial.writeAll(gcode_to_send->data(), gcode_to_send->length());
+                else
+                    delete gcode_to_send;
             }
 
             if (isPaused())
