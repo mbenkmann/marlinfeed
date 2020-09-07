@@ -16,11 +16,7 @@ SIGQUIT: wait for the end of the all queued prints, cool down printer, call /sbi
 SIGTERM: abort all prints, cool down printer, then terminate; be prepared to be shot down
          by SIGKILL before cooling down has finished.
 
-
-Print Statistics:
-  Min, Max, Avg Buffer fill level
-  Min, Max, Avg. Transfer rate (bps, gcode/s)  determined over 1s intervals
-
+Send M81 (Power Off) via API to trigger SIGQUIT. This allows shutting down the Raspberry Pi via Cura.
 
 Torture test generator that runs the head in a 1s circle with binary search of 
 segment size to determine the segment size at which the time starts to increase
