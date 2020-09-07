@@ -115,6 +115,8 @@ const option::Descriptor usage[] = {
 
 const char* NEW_SOCKET_CONNECTION = "New socket connection => Handled by child with PID %d\n";
 
+const char* COOLDOWN_GCODE = "M108\nM104 S0\nM105\n";
+
 // Maximum number of milliseconds we don't get a non-error reply from the printer.
 // This aborts the current job if the printer keeps replying to everything we send
 // with an error.
@@ -134,6 +136,14 @@ bool ioerror_next;
 int verbosity = 0;
 volatile sig_atomic_t interrupt = 0;
 
+// 0: normal operation
+// 1: system poweroff requested (by calling /sbin/poweroff) after cooldown
+//    the program remains running but won't accept new print files. It will
+//    only react to SIGTERM and SIGINT
+// 2: program termination requested after cooldown
+// 3: immediate shutdown
+volatile sig_atomic_t shutdown_level = 0;
+
 bool handle(File& out, File& serial, const char* infile, File* sock, const char** e, int* iop);
 void handle_socket_connection(int fd);
 void socketTest();
@@ -143,12 +153,38 @@ void signal_handler(int signum, siginfo_t*, void*)
     switch (signum)
     {
         case SIGUSR1:
+            if (shutdown_level != 0) // do not pause while shutting down
+                break;
             interrupt ^= 1;
+            break;
+        case SIGHUP:
+            if (shutdown_level != 0) // do not abort while shutting down
+                break;
+            interrupt |= 2;
+            break;
+        case SIGQUIT:
+            if (shutdown_level != 0) // once shutdown has been initiated it can't be cancelled
+                break;
+            interrupt ^= 4;
+            break;
+        case SIGINT:
+            // SIGINT is honored even while in a shutdown scenario
+            interrupt |= 2; // abort current print
+            shutdown_level = 3;
+            break;
+        case SIGTERM:
+            if (shutdown_level >= 2)
+                break;
+            if (shutdown_level == 0)
+                interrupt |= 2; // abort current print
+            shutdown_level = 2;
             break;
     }
 }
 
 bool isPaused() { return (interrupt & 1) != 0; }
+bool isAborted() { return (interrupt & 2) != 0; }
+bool isPowerOffWhenIdleRequested() { return (interrupt & 4) != 0; }
 
 // FIFO::filter() for removing file names with no known GCODE extension
 struct GCodeExtension
@@ -312,6 +348,16 @@ class PrinterState
         }
     }
 
+    // Returns true if the global shutdown_level != 0 and the hotend is at a safe
+    // temperature to turn off the hotend fan without risking that heat creep will
+    // melt filament above the heatbreak (which can lead to a blocked hotend).
+    bool readyForShutdown()
+    {
+        return shutdown_level != 0    // only ready for shutdown if shutdown actually requested
+               && tool[0][0] > 0.0    // make sure we actually have temperature data
+               && tool[0][0] < 100.0; // FIXME: What's the highest safe temperature???
+    }
+
     //"{\"job\":{\"file\":{\"name\":\"\"}},\"progress\":{\"printTime\":null,\"completion\":null}}"
     const char* jobJSON()
     {
@@ -449,6 +495,39 @@ gcode::Reader* inject_in;
 
 pid_t MainProcess = getpid();
 
+bool injecting_cooldown = false;
+// Fork a process that continually injects COOLDOWN_GCODE in 1s intervals.
+// This serves the dual purpose of updating the temperature readings so
+// that printerState.readyForShutdown() knows if the printer is cooled off.
+void inject_cooldown()
+{
+    if (verbosity > 0)
+        fprintf(stdout, "Waiting for printer to cool down\n");
+    injecting_cooldown = true;
+    if (fork() == 0)
+    {
+        close(cmd_inject[1]);
+        File injector("Command Injector", cmd_inject[0]);
+        while (injector.writeAll(COOLDOWN_GCODE, strlen(COOLDOWN_GCODE)))
+        {
+            sleep(1);
+        }
+        if (verbosity > 2)
+            fprintf(stdout, "Cooldown injector terminating\n");
+        _exit(0);
+    }
+}
+
+void call_poweroff()
+{
+    if (fork() == 0)
+    {
+        execlp("poweroff", "poweroff", (const char*)0);
+        perror("Executing 'poweroff'");
+        _exit(1);
+    }
+}
+
 int main(int argc, char* argv[])
 {
     signal(SIGCHLD, SIG_IGN); // automatic zombie removal
@@ -458,10 +537,10 @@ int main(int argc, char* argv[])
     sigact.sa_flags = SA_SIGINFO;
     sigfillset(&sigact.sa_mask);
     assert(0 == sigaction(SIGUSR1, &sigact, 0));
-    /*assert(0 == sigaction(SIGHUP, &sigact, 0));
+    assert(0 == sigaction(SIGHUP, &sigact, 0));
+    assert(0 == sigaction(SIGQUIT, &sigact, 0));
     assert(0 == sigaction(SIGINT, &sigact, 0));
     assert(0 == sigaction(SIGTERM, &sigact, 0));
-    assert(0 == sigaction(SIGQUIT, &sigact, 0));*/
 
     argc -= (argc > 0);
     argv += (argc > 0); // skip program name argv[0] if present
@@ -489,9 +568,9 @@ int main(int argc, char* argv[])
     }
 
     assert(0 == socketpair(AF_UNIX, SOCK_SEQPACKET, 0, cmd_inject));
-    File inject("Command Injector", cmd_inject[1]);
-    inject.setNonBlock(true);
-    inject_in = new gcode::Reader(inject);
+    File injector("Command Injector", cmd_inject[1]);
+    injector.setNonBlock(true);
+    inject_in = new gcode::Reader(injector);
     inject_in->whitespaceCompression(1);
 
     verbosity = options[VERBOSE].count();
@@ -626,40 +705,83 @@ int main(int argc, char* argv[])
         if (infile_queue.empty() && (sock == 0 || sock->hasError()) && dirScanner.empty())
             break;
 
+        if (shutdown_level == 3) // SIGINT => immediate terminate, if job was aborted a cooldown code was sent
+            exit(0);
+
+        if (shutdown_level > 0 && !injecting_cooldown)
+        {
+            // Clear infile queue so that only our injection is processed
+            for (;;)
+            {
+                auto infile = infile_queue.get();
+                if (infile == 0)
+                    break;
+                free(infile);
+            }
+            inject_cooldown();
+        }
+
+        if (printerState.readyForShutdown())
+        {
+            if (verbosity > 0)
+                fprintf(stdout, "Hotend at safe temperature for power down\n");
+            if (shutdown_level == 1) // system poweroff requested
+            {
+                fprintf(stdout, "Calling poweroff\n");
+                call_poweroff();
+                exit(0);
+            }
+            else // if (shutdown_level == 2)
+            {
+                fprintf(stdout, "Terminating due to SIGTERM\n");
+                exit(0);
+            }
+        }
+
         if (infile_queue.empty())
         {
-            if (sock)
+            if (shutdown_level == 0 && isPowerOffWhenIdleRequested())
             {
-                sock->poll(POLLIN, 250);
-                // Accept as socket connection if any is pending, then fork
-                // and handle it in a child process.
-                int connfd = sock->accept();
-                if (connfd >= 0)
-                {
-                    pid_t childpid = fork();
-                    if (childpid < 0)
-                        perror("fork");
-                    if (childpid == 0)
-                    {
-                        sock->close();
-                        handle_socket_connection(connfd);
-                        _exit(0);
-                    }
-                    close(connfd);
-                    if (verbosity > 0)
-                        fprintf(stdout, NEW_SOCKET_CONNECTION, childpid);
-                }
-                else
-                {
-                    if (sock->errNo() == EWOULDBLOCK)
-                        sock->clearError();
-                }
+                shutdown_level = 1;
             }
-            else if (!inject_in->hasNext())
-                usleep(250000); // to make sure we don't burn cycles waiting for files
 
-            dirScanner.refill(infile_queue);
-            infile_queue.filter(gcode_extension);
+            if (shutdown_level == 0)
+            {
+                if (sock)
+                {
+                    sock->poll(POLLIN, 250);
+                    // Accept as socket connection if any is pending, then fork
+                    // and handle it in a child process.
+                    int connfd = sock->accept();
+                    if (connfd >= 0)
+                    {
+                        pid_t childpid = fork();
+                        if (childpid < 0)
+                            perror("fork");
+                        if (childpid == 0)
+                        {
+                            sock->close();
+                            injector.close();
+                            handle_socket_connection(connfd);
+                            _exit(0);
+                        }
+                        close(connfd);
+                        if (verbosity > 1)
+                            fprintf(stdout, NEW_SOCKET_CONNECTION, childpid);
+                    }
+                    else
+                    {
+                        if (sock->errNo() == EWOULDBLOCK)
+                            sock->clearError();
+                    }
+                }
+                else if (!inject_in->hasNext())
+                    usleep(250000); // to make sure we don't burn cycles waiting for files
+
+                dirScanner.refill(infile_queue);
+                infile_queue.filter(gcode_extension);
+            }
+
             if (infile_queue.empty() && !inject_in->hasNext())
                 continue;
         }
@@ -669,6 +791,7 @@ int main(int argc, char* argv[])
                                  // 1: error occured on stdout,
                                  // 2: error occurred on printer device, do not reconnect
                                  // 3: error occurred on printer device, try reconnecting
+                                 // 4: print aborted by signal
 
         char* infile = infile_queue.get();
         if (infile == 0) // can only happen if we have something in inject_in
@@ -677,15 +800,16 @@ int main(int argc, char* argv[])
         if (!handle(out, serial, infile, sock, &error, &in_out_printer))
         {
             fprintf(stderr, "%s\n", error);
-            if (!ioerror_next)
+            if (in_out_printer != 4 && !ioerror_next)
                 exit(1);
             if (in_out_printer == 2) // hard error on printer (e.g. USB unplugged)
                 sleep(5);            // wait for it to go away (e.g. USB cable to be replugged)
-            if (in_out_printer == 2 || in_out_printer == 3)
-            {
-                serial.close();
-                printerState = PrinterState::Disconnected;
-            }
+        }
+
+        if (in_out_printer == 2 || in_out_printer == 3)
+        {
+            serial.close();
+            printerState = PrinterState::Disconnected;
         }
         else
             printerState = PrinterState::Idle;
@@ -703,6 +827,8 @@ bool handle_error(const char** e, const char* err_msg, int* iop, int which)
 
 bool handle(File& out, File& serial, const char* infile, File* sock, const char** e, int* iop)
 {
+    interrupt = 0;
+
     if (verbosity > 0)
     {
         out.writeAll("\n>>> ", 5);
@@ -899,12 +1025,24 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
             poll(fds, nfds, -1);
         }
 
+        if (isAborted())
+        {
+            serial.action("sending cooldown request to printer");
+            serial.setNonBlock(false);
+            for (int i = 0; i < 3; i++)
+            {
+                serial.writeAll(COOLDOWN_GCODE, strlen(COOLDOWN_GCODE));
+                usleep(10000);
+            }
+            return handle_error(e, "Print aborted", iop, 4);
+        }
+
         /*
           Handle all action on the serial interface before doing other stuff.
           This prioritizes communication with the printer because it is time-sensitive.
         */
         bool action_on_printer = true;
-        while (action_on_printer)
+        while (action_on_printer && !isAborted())
         {
             action_on_printer = false;
 
@@ -1063,11 +1201,12 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
                     serial.close();
                     in->close();
                     sock->close();
+                    close(cmd_inject[1]);
                     handle_socket_connection(connfd);
                     _exit(0);
                 }
                 close(connfd);
-                if (verbosity > 0)
+                if (verbosity > 1)
                     fprintf(stdout, NEW_SOCKET_CONNECTION, childpid);
             }
             else
@@ -1627,6 +1766,10 @@ void job_command(File& client, gcode::Reader& client_reader)
             if (action == 0) // toggle
                 kill(MainProcess, SIGUSR1);
         }
+        else if (command == 2)
+        {
+            kill(MainProcess, SIGHUP);
+        }
 
         char* reply;
         int len =
@@ -1707,7 +1850,7 @@ void handle_socket_connection(int fd)
     if (request == 0)
         _exit(0);
 
-    if (verbosity > 0)
+    if (verbosity > 1)
         out.writeAll(request->data(), request->length());
 
     if (verbosity > 3)

@@ -391,6 +391,8 @@ void process_next_command(File& peer)
             break;
         case M + 107: // Fan Off
             break;
+        case M + 108: // Break and Continue
+            break;
         case M + 109: // Wait for Hotend Temperature
             break;
         case M + 110: // Set Line Number
