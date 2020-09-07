@@ -202,6 +202,19 @@ struct GCodeExtension
     }
 } gcode_extension;
 
+struct PrintStats
+{
+    int64_t startTime = 0;
+    int64_t g28Time = 0;
+    int64_t underrunStart = 0;
+    int64_t underrunTime = 0;
+    int underrunCount = 0;
+    int errors = 0;
+    int resends = 0;
+    int gcodes = 0;
+    int bytes = 0;
+};
+
 const char* boolStr(bool b)
 {
     if (b)
@@ -988,6 +1001,9 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
     int64_t last_error = 0;
     int64_t last_lifesign = 0; // 0 => we're not waiting for a lifesign
 
+    PrintStats stats;
+    stats.startTime = millis();
+
     for (;;)
     {
         // Save CPU cycles by doing a poll() on the involved file descriptors
@@ -1071,6 +1087,8 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
                             stdoutbuf.put( // Don't exit for this error. The user knows best.
                                 new gcode::Line(
                                     "WARNING! Spurious 'ok'! Is a user manually controlling the printer?\n"));
+                        if (!marlinbuf.needsAck())
+                            stats.underrunStart = millis();
                     }
 
                     input->slice(idx);
@@ -1090,6 +1108,7 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
                 }
                 else if (input->startsWith("Error:"))
                 {
+                    ++stats.errors;
                     if (last_error == 0)
                         last_error = millis();
                     stdoutbuf.put(input); // echo to stdout
@@ -1102,6 +1121,7 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
                     if (last_error == 0)
                         last_error = millis();
                     ++resend_count;
+                    ++stats.resends;
                     input->slice(idx);
                     stdoutbuf.put(new Line("Resend: ")); // print the sliced away part
                     stdoutbuf.put(input);                // echo to stdout
@@ -1150,6 +1170,14 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
                 {
                     if (next_gcode->length() <= marlinbuf.maxAppendLen())
                     {
+                        if (next_gcode->startsWith("G28\b"))
+                        {
+                            stats.g28Time = millis();
+                            // If we have a G28 we only count GCODEs and bytes past that
+                            stats.gcodes = 0;
+                            stats.bytes = 0;
+                        }
+
                         action_on_printer = true;
                         marlinbuf.append(next_gcode->data());
                         delete next_gcode;
@@ -1171,10 +1199,21 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
                 action_on_printer = true;
                 gcode::Line* gcode_to_send = new gcode::Line(marlinbuf.next());
                 serial.writeAll(gcode_to_send->data(), gcode_to_send->length());
+
+                stats.gcodes++;
+                stats.bytes += gcode_to_send->length();
+
                 if (verbosity > 2)
                     stdoutbuf.put(gcode_to_send); // echo to stdout
                 else
                     delete gcode_to_send;
+
+                if (stats.underrunStart != 0)
+                {
+                    stats.underrunTime += millis() - stats.underrunStart;
+                    stats.underrunStart = 0;
+                    ++stats.underrunCount;
+                }
             }
 
             if (isPaused())
@@ -1249,6 +1288,26 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
             last_lifesign = 0;
             if (in->EndOfFile() && next_gcode == 0)
             {
+                int64_t dt = millis();
+                if (stats.g28Time == 0)
+                {
+                    dt -= stats.startTime;
+                    stats.g28Time = millis();
+                }
+                else
+                    dt -= stats.g28Time;
+
+                dt = (dt + 500) / 1000;
+                if (dt == 0)
+                    dt = 1;
+
+                fprintf(stdout,
+                        "Print:%s Err:%d Resend:%d Time:%lds Post-G28:%lds Underrun:%d*%ldms GCODE/s:%ld "
+                        "Transfer:%ldkbps\n",
+                        infile, stats.errors, stats.resends, (millis() - stats.startTime + 500) / 1000,
+                        (millis() - stats.g28Time + 500) / 1000, stats.underrunCount,
+                        (stats.underrunTime + 1) / (stats.underrunCount + 1), stats.gcodes / dt,
+                        stats.bytes * 8 / (1000 * dt));
                 *iop = 0;
                 *e = "EOF on GCode source";
                 return true;
@@ -1682,13 +1741,20 @@ void inject(File& client, gcode::Reader& client_reader)
 
                 if (*p == ']')
                 {
-                    if (verbosity > 1)
+                    *p = 0;
+                    if (strstr(commands, "\nM81\n") != 0)
                     {
-                        *p = 0;
-                        fprintf(stdout, "Injecting \"%s\"\n", commands);
+                        fprintf(stdout, "Received M81 via API => Convert to SIGQUIT\n");
+                        kill(MainProcess, SIGQUIT);
                     }
-                    *p = '\n';
-                    injector.writeAll(commands, p + 1 - commands);
+                    else
+                    {
+                        if (verbosity > 1)
+                            fprintf(stdout, "Injecting \"%s\"\n", commands);
+
+                        *p = '\n';
+                        injector.writeAll(commands, p + 1 - commands);
+                    }
 
                     char* reply;
                     int len = asprintf(&reply, HTTP_HEADERS, HTTPCodeNum[NoContent], HTTPCodeDesc[NoContent], "", 0,
