@@ -115,7 +115,19 @@ const option::Descriptor usage[] = {
 
 const char* NEW_SOCKET_CONNECTION = "New socket connection => Handled by child with PID %d\n";
 
+// Cooldown code sent to the printer when a print is aborted or when a shutdown is
+// scheduled. The nozzle needs to be cooled down before turning off the printer
+// because otherwise heat creep can cause filament above the heat break to melt
+// which can clog the nozzle if the fan is turned off suddenly.
+// The bed temperature is intentionally not touched in this code because it is
+// not relevant to the safety of turning off the power and keeping the bed warm
+// between prints reduces the startup time significantly on printers with weak
+// heaters.
 const char* COOLDOWN_GCODE = "M108\nM104 S0\nM105\n";
+
+// Code to lift the nozzle a bit sent after a print is aborted to prevent the
+// hot nozzle melting into the aborted print.
+const char* LIFT_NOZZLE_GCODE = "G91\nG0 Z10\nG90\n";
 
 // Maximum number of milliseconds we don't get a non-error reply from the printer.
 // This aborts the current job if the printer keeps replying to everything we send
@@ -1050,6 +1062,8 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
                 serial.writeAll(COOLDOWN_GCODE, strlen(COOLDOWN_GCODE));
                 usleep(10000);
             }
+            serial.writeAll(LIFT_NOZZLE_GCODE, strlen(LIFT_NOZZLE_GCODE));
+            usleep(250000);
             return handle_error(e, "Print aborted", iop, 4);
         }
 
