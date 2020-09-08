@@ -129,6 +129,10 @@ const char* COOLDOWN_GCODE = "M108\nM104 S0\nM105\n";
 // hot nozzle melting into the aborted print.
 const char* LIFT_NOZZLE_GCODE = "G91\nG0 Z10\nG90\n";
 
+// We use this as dummy infile if we want to run through the print loop to process
+// injected commands. Reading from /dev/null always gives EOF.
+const char* DEV_NULL = "/dev/null";
+
 // Maximum number of milliseconds we don't get a non-error reply from the printer.
 // This aborts the current job if the printer keeps replying to everything we send
 // with an error.
@@ -820,7 +824,7 @@ int main(int argc, char* argv[])
 
         char* infile = infile_queue.get();
         if (infile == 0) // can only happen if we have something in inject_in
-            infile = strdup("/dev/null");
+            infile = strdup(DEV_NULL);
 
         if (!handle(out, serial, infile, sock, &error, &in_out_printer))
         {
@@ -854,12 +858,10 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
 {
     interrupt = 0;
 
-    if (verbosity > 0)
-    {
-        out.writeAll("\n>>> ", 5);
-        out.writeAll(infile, strlen(infile));
-        out.writeAll("\n", 1);
-    }
+    bool dummy = strcmp(DEV_NULL, infile) == 0;
+
+    if (verbosity > 0 && !dummy)
+        fprintf(stdout, "Started print '%s'\n", infile);
 
     // (Re-)connect to printer if necessary.
     bool hard_reconnect = (serial.isClosed() || serial.EndOfFile() || serial.hasError());
@@ -1302,26 +1304,29 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
             last_lifesign = 0;
             if (in->EndOfFile() && next_gcode == 0)
             {
-                int64_t dt = millis();
-                if (stats.g28Time == 0)
+                if (!dummy)
                 {
-                    dt -= stats.startTime;
-                    stats.g28Time = millis();
+                    int64_t dt = millis();
+                    if (stats.g28Time == 0)
+                    {
+                        dt -= stats.startTime;
+                        stats.g28Time = millis();
+                    }
+                    else
+                        dt -= stats.g28Time;
+
+                    dt = (dt + 500) / 1000;
+                    if (dt == 0)
+                        dt = 1;
+
+                    fprintf(stdout,
+                            "Print:%s Err:%d Resend:%d Time:%llds Post-G28:%llds Underrun:%d*%lldms GCODE/s:%.1f "
+                            "Transfer:%lldbps\n",
+                            infile, stats.errors, stats.resends, (long long)(millis() - stats.startTime + 500) / 1000,
+                            (long long)(millis() - stats.g28Time + 500) / 1000, stats.underrunCount,
+                            (long long)(stats.underrunTime + 1) / (stats.underrunCount + 1),
+                            (float)stats.gcodes / (float)dt, (long long)stats.bytes * 8 / dt);
                 }
-                else
-                    dt -= stats.g28Time;
-
-                dt = (dt + 500) / 1000;
-                if (dt == 0)
-                    dt = 1;
-
-                fprintf(stdout,
-                        "Print:%s Err:%d Resend:%d Time:%llds Post-G28:%llds Underrun:%d*%lldms GCODE/s:%.1f "
-                        "Transfer:%lldbps\n",
-                        infile, stats.errors, stats.resends, (long long)(millis() - stats.startTime + 500) / 1000,
-                        (long long)(millis() - stats.g28Time + 500) / 1000, stats.underrunCount,
-                        (long long)(stats.underrunTime + 1) / (stats.underrunCount + 1),
-                        (float)stats.gcodes / (float)dt, (long long)stats.bytes * 8 / dt);
                 *iop = 0;
                 *e = "EOF on GCode source";
                 return true;
