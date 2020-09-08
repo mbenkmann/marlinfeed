@@ -1302,12 +1302,12 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
                     dt = 1;
 
                 fprintf(stdout,
-                        "Print:%s Err:%d Resend:%d Time:%lds Post-G28:%lds Underrun:%d*%ldms GCODE/s:%ld "
-                        "Transfer:%ldkbps\n",
-                        infile, stats.errors, stats.resends, (millis() - stats.startTime + 500) / 1000,
-                        (millis() - stats.g28Time + 500) / 1000, stats.underrunCount,
-                        (stats.underrunTime + 1) / (stats.underrunCount + 1), stats.gcodes / dt,
-                        stats.bytes * 8 / (1000 * dt));
+                        "Print:%s Err:%d Resend:%d Time:%llds Post-G28:%llds Underrun:%d*%lldms GCODE/s:%lld "
+                        "Transfer:%lldkbps\n",
+                        infile, stats.errors, stats.resends, (long long)(millis() - stats.startTime + 500) / 1000,
+                        (long long)(millis() - stats.g28Time + 500) / 1000, stats.underrunCount,
+                        (long long)(stats.underrunTime + 1) / (stats.underrunCount + 1), (long long)stats.gcodes / dt,
+                        (long long)stats.bytes * 8 / (1000 * dt));
                 *iop = 0;
                 *e = "EOF on GCode source";
                 return true;
