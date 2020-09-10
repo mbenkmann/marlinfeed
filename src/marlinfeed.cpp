@@ -571,6 +571,12 @@ int main(int argc, char* argv[])
     assert(0 == sigaction(SIGINT, &sigact, 0));
     assert(0 == sigaction(SIGTERM, &sigact, 0));
 
+    // We output some messages via the standard streams.
+    // Put them into line buffered mode so that they are flushed to
+    // systemd's journal at \n
+    setlinebuf(stdout);
+    setlinebuf(stderr);
+
     argc -= (argc > 0);
     argv += (argc > 0); // skip program name argv[0] if present
     option::Stats stats(true, usage, argc, argv);
@@ -1465,7 +1471,7 @@ void http_error(const char* message, int echo_verbosity, File& client, gcode::Re
     {
         client.writeAll(reply, len);
         if (verbosity >= echo_verbosity)
-            out.writeAll(reply, len);
+            fprintf(stderr, "Unsupported request: %s\n", message);
     }
     _exit(1);
 }
