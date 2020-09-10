@@ -524,7 +524,7 @@ gcode::Reader* inject_in;
 
 pid_t MainProcess = getpid();
 
-bool injecting_cooldown = false;
+int injecting_cooldown = 0;
 // Fork a process that continually injects COOLDOWN_GCODE in 1s intervals.
 // This serves the dual purpose of updating the temperature readings so
 // that printerState.readyForShutdown() knows if the printer is cooled off.
@@ -532,7 +532,7 @@ void inject_cooldown()
 {
     if (verbosity > 0)
         fprintf(stdout, "Waiting for printer to cool down\n");
-    injecting_cooldown = true;
+    injecting_cooldown = 1;
     if (fork() == 0)
     {
         close(cmd_inject[1]);
@@ -744,7 +744,7 @@ int main(int argc, char* argv[])
         if (shutdown_level == 3) // SIGINT => immediate terminate, if job was aborted a cooldown code was sent
             exit(0);
 
-        if (shutdown_level > 0 && !injecting_cooldown)
+        if (shutdown_level > 0 && injecting_cooldown == 0)
         {
             // Clear infile queue so that only our injection is processed
             for (;;)
@@ -757,7 +757,7 @@ int main(int argc, char* argv[])
             inject_cooldown();
         }
 
-        if (printerState.readyForShutdown())
+        if (injecting_cooldown == 1 && printerState.readyForShutdown())
         {
             if (verbosity > 0)
                 fprintf(stdout, "Hotend at safe temperature for power down\n");
@@ -773,11 +773,13 @@ int main(int argc, char* argv[])
                 sock->close();
                 sock = 0;
             }
-            else // if (shutdown_level == 2)
-            {
-                fprintf(stdout, "Terminating due to SIGTERM\n");
-                exit(0);
-            }
+            injecting_cooldown = 2;
+        }
+
+        if (injecting_cooldown == 2 && shutdown_level == 2)
+        {
+            fprintf(stdout, "Terminating due to SIGTERM\n");
+            exit(0);
         }
 
         if (infile_queue.empty())
