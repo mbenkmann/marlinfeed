@@ -3,10 +3,10 @@ CXXFLAGS=-W -Wall -g -fmessage-length=0 -std=gnu++11
 OPTIMIZE=-O2 -fomit-frame-pointer
 DEBUG=-O0 -lmcheck
 
-all: marlinfeed mocklin marlinfeed.1
+all: marlinfeed marlinfeed.1
 
 test: unit-tests
-	unit-tests
+	./unit-tests
 
 %: src/%.cpp src/marlinbuf.h src/gcode.h src/file.h src/fifo.h src/dirscanner.h
 	$(CXX) $(CXXFLAGS) $(OPTIMIZE) -o $@ $<
