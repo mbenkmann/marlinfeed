@@ -553,6 +553,7 @@ void call_poweroff()
     {
         execlp("sudo", "sudo", "/sbin/poweroff", (const char*)0);
         perror("Executing 'poweroff'");
+        kill(MainProcess, SIGTERM); // if we couldn't execute poweroff, make sure we still terminate
         _exit(1);
     }
 }
@@ -764,7 +765,13 @@ int main(int argc, char* argv[])
             {
                 fprintf(stdout, "Calling poweroff\n");
                 call_poweroff();
-                exit(0);
+                // Stop accepting any input. We just wait for SIGTERM now.
+                // We don't just exit because then systemd would kill our
+                // remaining processes which might kill the process calling
+                // poweroff.
+                injector.close();
+                sock->close();
+                sock = 0;
             }
             else // if (shutdown_level == 2)
             {
@@ -810,15 +817,16 @@ int main(int argc, char* argv[])
                             sock->clearError();
                     }
                 }
-                else if (!inject_in->hasNext())
-                    usleep(250000); // to make sure we don't burn cycles waiting for files
 
                 dirScanner.refill(infile_queue);
                 infile_queue.filter(gcode_extension);
             }
 
             if (infile_queue.empty() && !inject_in->hasNext())
+            {
+                usleep(250000); // to make sure we don't burn cycles waiting for files
                 continue;
+            }
         }
 
         const char* error = 0;   // error message returned by handle()
