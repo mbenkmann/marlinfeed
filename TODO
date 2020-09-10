@@ -37,3 +37,13 @@ need to be copied to the UDS, too.
 
 Print a few megabytes via Marlinfeed at different verbosity levels (especially verbosity 0 and verbosity 4)
 and check if memory usage keeps increasing => Memory leak
+
+We should probably clear Marlinbuf when an Error is received because we can't expect ok's to match up in
+that case.
+
+We may even want to clear Marlinbuf under some other circumstances, e.g. after a small time with no
+message from Marlin. I'll need to check Marlin's code to see if it's possible that a long-running command like G28 can
+leave stuff in the serial buffer. Or maybe just implement it and see if we get any errors. The line number
+counter and checksum should catch any data loss caused by this.
+This should probably wait till the torture test is implemented so we can test if this change can push the
+limit further.
