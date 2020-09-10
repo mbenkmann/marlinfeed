@@ -551,7 +551,7 @@ void call_poweroff()
 {
     if (fork() == 0)
     {
-        execlp("poweroff", "poweroff", (const char*)0);
+        execlp("sudo", "sudo", "/sbin/poweroff", (const char*)0);
         perror("Executing 'poweroff'");
         _exit(1);
     }
