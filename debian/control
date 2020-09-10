@@ -1,0 +1,18 @@
+Source: marlinfeed
+Section: utils
+Priority: optional
+Maintainer: Matthias S. Benkmann <matthias@winterdrache.de>
+Build-Depends: debhelper (>=9), go-md2man
+Standards-Version: 3.9.6
+Homepage: https://github.com/mbenkmann/marlinfeed
+Vcs-Git: https://github.com/mbenkmann/marlinfeed
+Vcs-Browser: https://github.com/mbenkmann/marlinfeed
+
+Package: marlinfeed
+Architecture: any
+Depends: ${misc:Depends}
+Recommends: wiringpi, gpio-utils
+Description: Send GCODE to Marlin; Partial Octoprint compatible API
+ Sends GCODE to Marlin very efficiently to avoid microstutters.
+ Can be accessed remotely via a partial implementation of Octoprint's API.
+ E.g. you can use Cura's Octoprint plugin to print on Marlinfeed.

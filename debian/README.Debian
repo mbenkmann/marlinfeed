@@ -1,0 +1,16 @@
+marlinfeed for Debian
+-----------------------
+
+* a user "marlinfeed" is created
+* user "marlinfeed" is in the "dialout" group for access to /dev/ttyUSB0
+* systemd runs marlinfeed as the user marlinfeed
+* marlinfeed listens on port 8080 so it doesn't conflict with OctoPrint
+  (You do still need to not have OctoPrint auto-connect to the printer for
+  both programs to coexist peacefully.)
+* /var/cache/marlinfeed is used to store uploaded .gcode files to be sent to the printer
+* a rule in /etc/sudoers.d is used to allow marlinfeed to execute /sbin/poweroff
+  (NOTE: marlinfeed has a shutdown feature so that you can send a "M81" command via Cura
+  and have the 3D printer cool off and then the power turned off).
+
+
+ -- Matthias S. Benkmann <matthias@winterdrache.de>  Thu, 10 Sep 2020 11:11:11 +0200

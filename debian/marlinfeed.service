@@ -1,0 +1,23 @@
+[Unit]
+Description=3D printer network access
+After=network.target
+
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/marlinfeed --api=http://%H:8080 /var/cache/marlinfeed /dev/ttyUSB0
+WorkingDirectory=/var/cache/marlinfeed
+User=marlinfeed
+CacheDirectory=marlinfeed
+StandardOutput=journal
+StandardError=inherit
+
+KillMode=mixed
+
+
+# 3 minutes timeout to allow marlinfeed to cool down the nozzle beforing powering down
+TimeoutStopSec=180
+
+
+[Install]
+WantedBy=multi-user.target
