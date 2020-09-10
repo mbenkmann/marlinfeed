@@ -11,3 +11,6 @@
 override_dh_testdir:
 	dh_testdir
 	debian/make-orig --dont-overwrite
+
+override_dh_auto_test:
+	echo Skipping tests. They are for development only and not guaranteed to work.
