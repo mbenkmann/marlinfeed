@@ -18,6 +18,9 @@ SIGTERM: abort all prints, cool down printer, then terminate; be prepared to be 
 
 Send M81 (Power Off) via API to trigger SIGQUIT. This allows shutting down the Raspberry Pi via Cura.
 
+If G28 is encountered, adjust expected print time (if the GCODE contains a ;TIME comment) by the
+time it took to get to G28 minus 10s (because 10s seems to be what Cura assumes for heating)
+
 Torture test generator that runs the head in a 1s circle with binary search of 
 segment size to determine the segment size at which the time starts to increase
 over 1s.
