@@ -1105,8 +1105,12 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
             reparse:
                 if (0 != (idx = input->startsWith("ok\b")))
                 {
+                    gcode::Line* okay = 0;
                     if (verbosity > 2)
-                        stdoutbuf.put(new gcode::Line("ok\n")); // echo to stdout
+                    {
+                        okay = new gcode::Line("!ok\n"); // ! marker will be removed unless underrun
+                        stdoutbuf.put(okay);
+                    }
 
                     last_ok_time = millis();
                     if (ignore_ok)
@@ -1119,8 +1123,14 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
                             stdoutbuf.put( // Don't exit for this error. The user knows best.
                                 new gcode::Line(
                                     "WARNING! Spurious 'ok'! Is a user manually controlling the printer?\n"));
-                        if (!marlinbuf.needsAck())
-                            stats.underrunStart = millis();
+                    }
+
+                    if (stats.underrunStart == 0 && !marlinbuf.needsAck())
+                        stats.underrunStart = last_ok_time;
+                    else
+                    { // if we have no underrun, remove the "!" before the "ok"
+                        if (okay)
+                            okay->slice(1);
                     }
 
                     input->slice(idx);
