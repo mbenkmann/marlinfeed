@@ -37,7 +37,8 @@ Support for Unix Domain Sockets as infiles. That way one could easily make an in
 via socat. If a UDS is infile, then data received from the printer as well as error messages
 need to be copied to the UDS, too.  
 
-While idle, check temperatures every few seconds.
+While idle, check temperatures every few seconds, maybe only if API queries are occuring, so that
+we don't interfere with a print from the SD if Cura and the plugin aren't talking to Marlinfeed.
 
 Let M117 set Job Name so that you can see the message in Cura. Very useful when using the Display Filename and Layer
 Script.
