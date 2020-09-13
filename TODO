@@ -37,6 +37,8 @@ Support for Unix Domain Sockets as infiles. That way one could easily make an in
 via socat. If a UDS is infile, then data received from the printer as well as error messages
 need to be copied to the UDS, too.  
 
+While idle, check temperatures every few seconds.
+
 Let M117 set Job Name so that you can see the message in Cura. Very useful when using the Display Filename and Layer
 Script.
 
