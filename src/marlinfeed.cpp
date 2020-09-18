@@ -855,6 +855,8 @@ int main(int argc, char* argv[])
         {
             serial.close();
             printerState = PrinterState::Disconnected;
+            if (in_out_printer == 2 && injecting_cooldown > 0) // Do not let a hard error prevent shutdown
+                printerState.parseTemperatureReport("T:12 E:0 B:34");
         }
         else
             printerState = PrinterState::Idle;
