@@ -222,9 +222,6 @@ struct PrintStats
 {
     int64_t startTime = 0;
     int64_t g28Time = 0;
-    int64_t underrunStart = 0;
-    int64_t underrunTime = 0;
-    int underrunCount = 0;
     int errors = 0;
     int resends = 0;
     int gcodes = 0;
@@ -1107,12 +1104,8 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
             reparse:
                 if (0 != (idx = input->startsWith("ok\b")))
                 {
-                    gcode::Line* okay = 0;
                     if (verbosity > 2)
-                    {
-                        okay = new gcode::Line("!ok\n"); // ! marker will be removed unless underrun
-                        stdoutbuf.put(okay);
-                    }
+                        stdoutbuf.put(new gcode::Line("ok\n"));
 
                     last_ok_time = millis();
                     if (ignore_ok)
@@ -1125,14 +1118,6 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
                             stdoutbuf.put( // Don't exit for this error. The user knows best.
                                 new gcode::Line(
                                     "WARNING! Spurious 'ok'! Is a user manually controlling the printer?\n"));
-                    }
-
-                    if (stats.underrunStart == 0 && !marlinbuf.needsAck())
-                        stats.underrunStart = last_ok_time;
-                    else
-                    { // if we have no underrun, remove the "!" before the "ok"
-                        if (okay)
-                            okay->slice(1);
                     }
 
                     input->slice(idx);
@@ -1251,13 +1236,6 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
                     stdoutbuf.put(gcode_to_send); // echo to stdout
                 else
                     delete gcode_to_send;
-
-                if (stats.underrunStart != 0)
-                {
-                    stats.underrunTime += millis() - stats.underrunStart;
-                    stats.underrunStart = 0;
-                    ++stats.underrunCount;
-                }
             }
 
             if (isPaused())
@@ -1348,12 +1326,11 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
                         dt = 1;
 
                     fprintf(stdout,
-                            "Print:%s Err:%d Resend:%d Time:%llds Post-G28:%llds Underrun:%d*%lldms GCODE/s:%.1f "
+                            "Print:%s Err:%d Resend:%d Time:%llds Post-G28:%llds GCODE/s:%.1f "
                             "Transfer:%lldbps\n",
                             infile, stats.errors, stats.resends, (long long)(millis() - stats.startTime + 500) / 1000,
-                            (long long)(millis() - stats.g28Time + 500) / 1000, stats.underrunCount,
-                            (long long)(stats.underrunTime + 1) / (stats.underrunCount + 1),
-                            (float)stats.gcodes / (float)dt, (long long)stats.bytes * 8 / dt);
+                            (long long)(millis() - stats.g28Time + 500) / 1000, (float)stats.gcodes / (float)dt,
+                            (long long)stats.bytes * 8 / dt);
                 }
                 *iop = 0;
                 *e = "EOF on GCode source";
