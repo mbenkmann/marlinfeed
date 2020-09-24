@@ -1,0 +1,14 @@
+[Unit]
+Description=Monitoring GPIO pins
+DefaultDependencies=no
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/home/msb/gpio-monitor.service.sh
+User=root
+StandardOutput=journal
+StandardError=inherit
+
+[Install]
+WantedBy=multi-user.target
