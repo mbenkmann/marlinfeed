@@ -66,3 +66,6 @@ If the times are around the minimum for a while that means Marlin ack's every ne
 meaning Marlin is waiting for us. That's bad. The buffer is empty.
 If the times are over a certain threshold (some constant k times the minimum time)
 everything is fine because it means we are waiting for Marlin which means Marlin's buffer is full.
+
+What happens in case of filament runout? Does the printer handle that? Does the printer communicate that
+over the wire so marlinfeed can react?
