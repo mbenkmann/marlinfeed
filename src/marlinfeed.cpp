@@ -850,8 +850,9 @@ int main(int argc, char* argv[])
                 exit(1);
             if (in_out_printer == 2) // hard error on printer (e.g. USB unplugged)
             {
-                hard_error_count++;
-                sleep(5); // wait for it to go away (e.g. USB cable to be replugged)
+                if (hard_error_count < 6)
+                    hard_error_count++;
+                sleep(5 * hard_error_count); // wait for it to go away (e.g. USB cable to be replugged)
             }
         }
 
