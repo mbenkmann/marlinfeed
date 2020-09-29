@@ -731,6 +731,8 @@ int main(int argc, char* argv[])
     if (api_base_url != 0 && strcmp(api_base_url, "Debug") == 0)
         socketTest();
 
+    int hard_error_count = 0;
+
     for (;;)
     {
         // If we're done with all infiles and there is no chance of any additional
@@ -839,20 +841,25 @@ int main(int argc, char* argv[])
         if (infile == 0) // can only happen if we have something in inject_in
             infile = strdup(DEV_NULL);
 
-        if (!handle(out, serial, infile, sock, &error, &in_out_printer))
+        if (handle(out, serial, infile, sock, &error, &in_out_printer))
+            hard_error_count = 0;
+        else
         {
             fprintf(stderr, "%s\n", error);
             if (in_out_printer != 4 && !ioerror_next)
                 exit(1);
             if (in_out_printer == 2) // hard error on printer (e.g. USB unplugged)
-                sleep(5);            // wait for it to go away (e.g. USB cable to be replugged)
+            {
+                hard_error_count++;
+                sleep(5); // wait for it to go away (e.g. USB cable to be replugged)
+            }
         }
 
         if (in_out_printer == 2 || in_out_printer == 3)
         {
             serial.close();
             printerState = PrinterState::Disconnected;
-            if (in_out_printer == 2 && injecting_cooldown > 0) // Do not let a hard error prevent shutdown
+            if (hard_error_count > 3 && injecting_cooldown > 0) // Do not let a hard error prevent shutdown
                 printerState.parseTemperatureReport("T:12 E:0 B:34");
         }
         else
