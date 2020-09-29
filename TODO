@@ -8,7 +8,9 @@ Watch GPIO pin 4 and on a POSITIVE EDGE, treat it as if marlinfeed had received 
 Watch GPIO pin 6 and on a NEGATIVE EDGE, treat it as if marlinfeed had received SIGUSR1
 
 SIGUSR1: pause current print or resume if currently paused
-SIGHUP: abort current print, set temperatures to 0, continue with next infile even if ioerror==quit.
+SIGHUP: abort current print, set nozzle temperature to 0, continue with next infile even if ioerror==quit.
+        If no current print is running, restart the most recent print (during this session of marlinfeed,
+        not from a previous session) regardless of whether that print was just aborted or finished normally.
 SIGINT: abort print, set temperatures to 0, exit without waiting for cooldown
         NOTE: If there is no current print running, temperature won't be set to 0. The program will
         just exit.
