@@ -152,8 +152,8 @@ const int MAX_TIME_SILENCE = 120000;
 const int STALL_TIME = 2000;
 
 bool ioerror_next;
+char* lastPrintedFile = 0;
 int verbosity = 0;
-volatile sig_atomic_t interrupt = 0;
 
 // 0: normal operation
 // 1: system poweroff requested (by calling /sbin/poweroff) after cooldown
@@ -166,44 +166,6 @@ volatile sig_atomic_t shutdown_level = 0;
 bool handle(File& out, File& serial, const char* infile, File* sock, const char** e, int* iop);
 void handle_socket_connection(int fd);
 void socketTest();
-
-void signal_handler(int signum, siginfo_t*, void*)
-{
-    switch (signum)
-    {
-        case SIGUSR1:
-            if (shutdown_level != 0) // do not pause while shutting down
-                break;
-            interrupt ^= 1;
-            break;
-        case SIGHUP:
-            if (shutdown_level != 0) // do not abort while shutting down
-                break;
-            interrupt |= 2;
-            break;
-        case SIGQUIT:
-            if (shutdown_level != 0) // once shutdown has been initiated it can't be cancelled
-                break;
-            interrupt ^= 4;
-            break;
-        case SIGINT:
-            // SIGINT is honored even while in a shutdown scenario
-            interrupt |= 2; // abort current print
-            shutdown_level = 3;
-            break;
-        case SIGTERM:
-            if (shutdown_level >= 2)
-                break;
-            if (shutdown_level == 0)
-                interrupt |= 2; // abort current print
-            shutdown_level = 2;
-            break;
-    }
-}
-
-bool isPaused() { return (interrupt & 1) != 0; }
-bool isAborted() { return (interrupt & 2) != 0; }
-bool isPowerOffWhenIdleRequested() { return (interrupt & 4) != 0; }
 
 // FIFO::filter() for removing file names with no known GCODE extension
 struct GCodeExtension
@@ -515,6 +477,50 @@ class PrinterState
     }
 } printerState;
 
+volatile sig_atomic_t interrupt = 0;
+
+void signal_handler(int signum, siginfo_t*, void*)
+{
+    switch (signum)
+    {
+        case SIGUSR1:
+            if (shutdown_level != 0) // do not pause while shutting down
+                break;
+            interrupt ^= 1;
+            break;
+        case SIGHUP:
+            if (shutdown_level != 0) // do not abort while shutting down
+                break;
+            if (printerState.status == PrinterState::Idle || printerState.status == PrinterState::Disconnected)
+                interrupt |= 8;
+            else
+                interrupt |= 2;
+            break;
+        case SIGQUIT:
+            if (shutdown_level != 0) // once shutdown has been initiated it can't be cancelled
+                break;
+            interrupt ^= 4;
+            break;
+        case SIGINT:
+            // SIGINT is honored even while in a shutdown scenario
+            interrupt |= 2; // abort current print
+            shutdown_level = 3;
+            break;
+        case SIGTERM:
+            if (shutdown_level >= 2)
+                break;
+            if (shutdown_level == 0)
+                interrupt |= 2; // abort current print
+            shutdown_level = 2;
+            break;
+    }
+}
+
+bool isPaused() { return (interrupt & 1) != 0; }
+bool isAborted() { return (interrupt & 2) != 0; }
+bool isPowerOffWhenIdleRequested() { return (interrupt & 4) != 0; }
+bool isPrintLastFileRequested() { return (interrupt & 8) != 0; }
+
 File out("stdout", 1);
 
 const char* api_base_url = 0;
@@ -824,6 +830,13 @@ int main(int argc, char* argv[])
 
                 dirScanner.refill(infile_queue);
                 infile_queue.filter(gcode_extension);
+
+                if (infile_queue.empty() && isPrintLastFileRequested())
+                {
+                    interrupt = 0;
+                    if (lastPrintedFile != 0)
+                        infile_queue.put(strdup(lastPrintedFile));
+                }
             }
 
             if (infile_queue.empty() && !inject_in->hasNext())
@@ -843,6 +856,11 @@ int main(int argc, char* argv[])
         char* infile = infile_queue.get();
         if (infile == 0) // can only happen if we have something in inject_in
             infile = strdup(DEV_NULL);
+        else
+        {
+            free(lastPrintedFile);
+            lastPrintedFile = strdup(infile);
+        }
 
         if (handle(out, serial, infile, sock, &error, &in_out_printer))
             hard_error_count = 0;
@@ -862,12 +880,13 @@ int main(int argc, char* argv[])
                 fprintf(stderr, "Hard error prevents checking printer temperature => Pretending it's fine.\n");
                 printerState.parseTemperatureReport("T:12 E:0 B:34");
             }
-            
+
             if (in_out_printer == 2) // hard error on printer (e.g. USB unplugged)
             {
                 if (hard_error_count < 4)
                     hard_error_count++;
-                fprintf(stderr,"Suspending operation for %ds in hopes hard error will disappear\n", 5*hard_error_count);
+                fprintf(stderr, "Suspending operation for %ds in hopes hard error will disappear\n",
+                        5 * hard_error_count);
                 sleep(5 * hard_error_count); // wait for it to go away (e.g. USB cable to be replugged)
             }
         }
@@ -930,7 +949,7 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
     // because Marlin spams some stuff over the line when a new connection is established.
     if (hard_reconnect)
         serial.poll(POLLIN, 3000);
-        
+
     for (; attempt <= MAX_ATTEMPTS; attempt++)
     {
         char buffy[2048];
@@ -967,14 +986,14 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
 
         if (verbosity > 1)
         {
-            if (hard_reconnect) 
-              out.writeAll(STOP_SD_PRINT_GCODE, strlen(STOP_SD_PRINT_GCODE));
+            if (hard_reconnect)
+                out.writeAll(STOP_SD_PRINT_GCODE, strlen(STOP_SD_PRINT_GCODE));
             out.writeAll(MarlinBuf::WRAP_AROUND_STRING, MarlinBuf::WRAP_AROUND_STRING_LENGTH);
         }
 
         if (hard_reconnect)
-          serial.writeAll(STOP_SD_PRINT_GCODE, strlen(STOP_SD_PRINT_GCODE));
-          
+            serial.writeAll(STOP_SD_PRINT_GCODE, strlen(STOP_SD_PRINT_GCODE));
+
         if (!serial.writeAll(MarlinBuf::WRAP_AROUND_STRING, MarlinBuf::WRAP_AROUND_STRING_LENGTH))
         {
             if (hard_reconnect)
@@ -985,9 +1004,9 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
 
         // give the printer some time to reset itself
         if (hard_reconnect)
-            usleep(1500000<<attempt); // give the printer some time to reset itself
+            usleep(1500000 << attempt); // give the printer some time to reset itself
         else
-            usleep(100000*attempt);
+            usleep(100000 * attempt);
     }
 
     if (out.hasError())
@@ -1009,9 +1028,9 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
         else
             goto do_hard_reconnect;
     }
-    
+
     if (hard_reconnect && verbosity > 0)
-      fprintf(stdout, "Successfully established printer connection\n");
+        fprintf(stdout, "Successfully established printer connection\n");
 
     printerState = PrinterState::Idle;
 
