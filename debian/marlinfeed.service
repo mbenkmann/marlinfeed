@@ -5,7 +5,7 @@ After=network.target
 
 [Service]
 Type=exec
-ExecStart=/usr/bin/marlinfeed --api=http://%H:8000 /var/cache/marlinfeed /dev/ttyUSB0
+ExecStart=/usr/bin/marlinfeed -v --api=http://%H:8000 /var/cache/marlinfeed /dev/ttyUSB0
 WorkingDirectory=/var/cache/marlinfeed
 User=marlinfeed
 CacheDirectory=marlinfeed
