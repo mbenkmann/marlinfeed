@@ -125,6 +125,9 @@ const char* NEW_SOCKET_CONNECTION = "New socket connection => Handled by child w
 // heaters.
 const char* COOLDOWN_GCODE = "M108\nM104 S0\nM105\n";
 
+// Code sent when hard reconnecting to printer to stop any pending SD card print.
+const char* STOP_SD_PRINT_GCODE = "M524\n";
+
 // Code to lift the nozzle a bit sent after a print is aborted to prevent the
 // hot nozzle melting into the aborted print.
 const char* LIFT_NOZZLE_GCODE = "G91\nG0 Z10\nG90\n";
@@ -848,12 +851,6 @@ int main(int argc, char* argv[])
             fprintf(stderr, "%s\n", error);
             if (in_out_printer != 4 && !ioerror_next)
                 exit(1);
-            if (in_out_printer == 2) // hard error on printer (e.g. USB unplugged)
-            {
-                if (hard_error_count < 6)
-                    hard_error_count++;
-                sleep(5 * hard_error_count); // wait for it to go away (e.g. USB cable to be replugged)
-            }
         }
 
         if (in_out_printer == 2 || in_out_printer == 3)
@@ -861,7 +858,18 @@ int main(int argc, char* argv[])
             serial.close();
             printerState = PrinterState::Disconnected;
             if (hard_error_count > 3 && injecting_cooldown > 0) // Do not let a hard error prevent shutdown
+            {
+                fprintf(stderr, "Hard error prevents checking printer temperature => Pretending it's fine.\n");
                 printerState.parseTemperatureReport("T:12 E:0 B:34");
+            }
+            
+            if (in_out_printer == 2) // hard error on printer (e.g. USB unplugged)
+            {
+                if (hard_error_count < 4)
+                    hard_error_count++;
+                fprintf(stderr,"Suspending operation for %ds in hopes hard error will disappear\n", 5*hard_error_count);
+                sleep(5 * hard_error_count); // wait for it to go away (e.g. USB cable to be replugged)
+            }
         }
         else
             printerState = PrinterState::Idle;
@@ -916,14 +924,14 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
     serial.action("connecting to printer");
     serial.setNonBlock(true);
     const int MAX_ATTEMPTS = 4;
-    int attempt = 0;
+    int attempt = 1;
 
     // On hard reconnect, start by waiting up to 3s for something to appear on the line
     // because Marlin spams some stuff over the line when a new connection is established.
     if (hard_reconnect)
         serial.poll(POLLIN, 3000);
-
-    for (; attempt < MAX_ATTEMPTS; attempt++)
+        
+    for (; attempt <= MAX_ATTEMPTS; attempt++)
     {
         char buffy[2048];
         int idx = serial.tail(buffy, sizeof(buffy) - 1 /* -1 for appending \n if nec. */, 500);
@@ -949,17 +957,24 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
         // buffy[n-1] is \n terminating the last line
         // buffy[n] is out of bounds
 
-        if (verbosity > 0)
+        if (verbosity > 1)
             out.writeAll(buffy, n);
 
         // When we get here for attempt 0, we haven't yet sent WRAP_AROUND_STRING, so any ok
         // we may see is unrelated. Therefore we don't break for attempt == 0.
-        if (attempt > 0 && (buffy[idx] == 'o' && buffy[idx + 1] == 'k' && buffy[idx + 2] <= ' '))
+        if (attempt > 1 && (buffy[idx] == 'o' && buffy[idx + 1] == 'k' && buffy[idx + 2] <= ' '))
             break;
 
-        if (verbosity > 0)
+        if (verbosity > 1)
+        {
+            if (hard_reconnect) 
+              out.writeAll(STOP_SD_PRINT_GCODE, strlen(STOP_SD_PRINT_GCODE));
             out.writeAll(MarlinBuf::WRAP_AROUND_STRING, MarlinBuf::WRAP_AROUND_STRING_LENGTH);
+        }
 
+        if (hard_reconnect)
+          serial.writeAll(STOP_SD_PRINT_GCODE, strlen(STOP_SD_PRINT_GCODE));
+          
         if (!serial.writeAll(MarlinBuf::WRAP_AROUND_STRING, MarlinBuf::WRAP_AROUND_STRING_LENGTH))
         {
             if (hard_reconnect)
@@ -970,9 +985,9 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
 
         // give the printer some time to reset itself
         if (hard_reconnect)
-            usleep(1500000); // give the printer some time to reset itself
+            usleep(1500000<<attempt); // give the printer some time to reset itself
         else
-            usleep(100000);
+            usleep(100000*attempt);
     }
 
     if (out.hasError())
@@ -987,13 +1002,16 @@ bool handle(File& out, File& serial, const char* infile, File* sock, const char*
 
     serial.action("");
 
-    if (attempt == MAX_ATTEMPTS)
+    if (attempt > MAX_ATTEMPTS)
     {
         if (hard_reconnect)
             return handle_error(e, "Failed to establish connection with printer", iop, 2);
         else
             goto do_hard_reconnect;
     }
+    
+    if (hard_reconnect && verbosity > 0)
+      fprintf(stdout, "Successfully established printer connection\n");
 
     printerState = PrinterState::Idle;
 
@@ -1567,7 +1585,7 @@ void upload(File& client, gcode::Reader& client_reader)
                     if (!(*p > 127 || isalnum(*p) || *p == '_' || *p == '-' || *p == '+' || *p == '.' || *p == ','))
                         *p = '_';
 
-                if (verbosity > 0)
+                if (verbosity > 1)
                 {
                     char msg[1024];
                     int len =
@@ -1610,7 +1628,7 @@ void upload(File& client, gcode::Reader& client_reader)
                 }
                 else
                 {
-                    if (verbosity > 0)
+                    if (verbosity > 1)
                     {
                         char msg[512];
                         int len = snprintf(msg, sizeof(msg), "Storing upload data in temporary file '%s'\n", tempname);
