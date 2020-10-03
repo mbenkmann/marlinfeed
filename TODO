@@ -1,11 +1,10 @@
 Some ideas. Won't necessarily all be implemented.
 
---gpio=1+,2-,4^HUP,6vUSR1
-
-Set GPIO pin 1 to HIGH
-Set GPIO pin 2 to LOW
-Watch GPIO pin 4 and on a POSITIVE EDGE, treat it as if marlinfeed had received SIGHUP
-Watch GPIO pin 6 and on a NEGATIVE EDGE, treat it as if marlinfeed had received SIGUSR1
+I've noticed that if I print from SD card and then try to connect with marlinfeed the
+printer resets and gets a new tty device (ttyUSB1 vs ttyUSB0). An idea to cope with this:
+If the printer path passed to marlinfeed is a path of a directory under /sys, do a breadth first
+search starting from that directory for the first directory matching the pattern ttyUSB*
+and use that as device name in /dev.
 
 SIGUSR1: pause current print or resume if currently paused
 SIGHUP: abort current print, set nozzle temperature to 0, continue with next infile even if ioerror==quit.
