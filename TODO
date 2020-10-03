@@ -3,8 +3,9 @@ Some ideas. Won't necessarily all be implemented.
 I've noticed that if I print from SD card and then try to connect with marlinfeed the
 printer resets and gets a new tty device (ttyUSB1 vs ttyUSB0). An idea to cope with this:
 If the printer path passed to marlinfeed is a path of a directory under /sys, do a breadth first
-search starting from that directory for the first directory matching the pattern ttyUSB*
-and use that as device name in /dev.
+search starting from that directory for the first directory (or symlink pointing at a directory)
+matching the pattern ttyUSB* and use that as device name in /dev.
+Best path for the default marlinfeed.service file is probably /sys/bus/usb-serial
 
 SIGUSR1: pause current print or resume if currently paused
 SIGHUP: abort current print, set nozzle temperature to 0, continue with next infile even if ioerror==quit.
