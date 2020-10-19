@@ -1,5 +1,9 @@
 Some ideas. Won't necessarily all be implemented.
 
+Printing something from Cura while another print is running does not work properly.
+It talks about queuing,...
+Need to take care to not overwrite the gcode file currently being printed.
+
 I've noticed that if I print from SD card and then try to connect with marlinfeed the
 printer resets and gets a new tty device (ttyUSB1 vs ttyUSB0). An idea to cope with this:
 If the printer path passed to marlinfeed is a path of a directory under /sys, do a breadth first
