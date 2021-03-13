@@ -75,3 +75,5 @@ everything is fine because it means we are waiting for Marlin which means Marlin
 
 What happens in case of filament runout? Does the printer handle that? Does the printer communicate that
 over the wire so marlinfeed can react?
+
+Abort code should move the nozzle home and disable the steppers to make it easier to remove the faulty print.
