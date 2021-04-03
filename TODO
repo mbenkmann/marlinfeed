@@ -77,3 +77,5 @@ What happens in case of filament runout? Does the printer handle that? Does the 
 over the wire so marlinfeed can react?
 
 Abort code should move the nozzle home and disable the steppers to make it easier to remove the faulty print.
+
+Queuing (i.e. selecting Print to Octoprint while a print is running in Cura) doesn't seem to work.
